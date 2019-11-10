@@ -51,10 +51,6 @@ impl PeerServer{
             match_index:0,
         }
     }
-
-    pub fn reset(&mut self){
-        self.vote_granted = false;
-    }
 }
 
 impl RaftNode {
@@ -73,26 +69,35 @@ impl RaftNode {
         }
     }
 
-    async fn receive(mut self,mut events: Receiver<Request>){
-        self.pre_vote().await.unwrap();
-        self.request_vote().await;
-        let events = io::timeout(Duration::from_nanos(150),async {
-            loop{
-                match events.next().await{
-                    Some(event)=>{
-                        return Ok(event);
-                    },
-                    None=>continue,
+    async fn receive(&mut self,events: &mut Receiver<Request>){
+        loop{
+            let events = io::timeout(Duration::from_millis(300),async {
+                loop{
+                    match events.next().await{
+                        Some(event)=>{
+                            return Ok(event);
+                        },
+                        None=>continue,
+                    }
                 }
+            }).await;
+            match events{
+                Ok(events)=>self.handle_request(events).await,
+                Err(_)=>{
+                    //out of time slice
+                    loop{
+                        if io::timeout(Duration::from_millis(300),self.request_vote()).await.is_ok() {
+                            break;
+                        }
+                        println!("no result");
+                    }
+                    //finally , become leader or follower
+                },
             }
-        }).await;
-        match events{
-            Ok(events)=>self.handle_request(events).await,
-            Err(_)=>self.timeout().await,
         }
     }
 
-    async fn handle_request(self,req:Request){
+    async fn handle_request(&mut self,req:Request){
         match req.rtype{
             RequestType::Vote=>{
                 println!("vote");
@@ -105,30 +110,52 @@ impl RaftNode {
         }
     }
 
-    async fn timeout(self){
-        println!("timeout");
-    }
-
-    async fn pre_vote(&mut self)->Result<()>{
+    fn pre_vote(&mut self){
         if self.state==NodeState::LEADER{
-            return Err("during leader election timer, this should not happen!".into());
+            panic!("during leader election timer, this should not happen!");
         }
         self.current_term+=1;
         self.voted_for=Some((&self.server_id).to_string());
         self.state=NodeState::CANDIDATE;
+    }
+
+    async fn request_vote(&mut self)->std::io::Result<()>{
+        self.pre_vote();
+        let request = VoteRequest::new(self.current_term, &self.server_id,self.logs.get_last_index(),self.logs.get_last_term());
+        let peers = self.peers.iter().map(|i|{
+            let mut peer = i.borrow_mut();
+            peer.vote_granted = false;
+            peer.end_point.clone()
+        }).collect::<std::collections::HashSet<String>>();
+        let mut vote_granted_num = 1;
+        for peer in &peers{
+            match request.send(&peer).await{
+                Ok(resp) if resp.term>self.current_term =>{
+                    println!("the resp term > current term");
+                    println!("become followeer");
+                    break;
+                },
+                Ok(resp) if resp.vote_granted =>{
+                    vote_granted_num+=1;
+                    if vote_granted_num > (&peers.len()+1)/2{
+                        println!("Win !!!");
+                        println!("become leader");
+                        self.become_leader()
+                    }
+                },
+                Ok(_) => {
+                    println!("Let me down");
+                },
+                Err(_)=>{
+                    println!("oops , I can't parse the response ");
+                }
+            }
+        }
         Ok(())
     }
 
-    async fn request_vote(&mut self){
-        let request = VoteRequest::new(self.current_term, &self.server_id,self.logs.get_last_index(),self.logs.get_last_term());
-        self.peers.iter().for_each(|i|{
-            let peer = i.borrow_mut();
-            peer.reset();
-            async {
-                request.send(&peer.end_point).await;
-                Ok(())
-            };
-        });
+    fn become_leader(&mut self){
+
     }
 
     async fn handle_connection(mut producer: Sender<Request> ,mut stream : TcpStream)->Result<()>{
@@ -148,9 +175,11 @@ impl RaftNode {
 
 pub async fn bootstrap(addr :&str, peers : Peers) -> Result<()>{
     let listener = TcpListener::bind(addr).await?;
-    let raft_node = RaftNode::new(peers,addr.to_string(),StateMachine::new());
-    let (producer, consumer) = mpsc::unbounded();
-    let consumer = task::spawn(raft_node.receive(consumer));
+    let (producer, mut consumer) = mpsc::unbounded();
+    let mut raft_node = RaftNode::new(peers,addr.to_string(),StateMachine::new());
+    let consumer = task::spawn(async move{
+        raft_node.receive(&mut consumer).await;
+    });
     let mut incoming = listener.incoming();
     while let Some(Ok(stream)) = incoming.next().await{
         println!("Accepting from: {}", stream.peer_addr()?);

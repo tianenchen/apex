@@ -60,8 +60,8 @@ pub struct VoteRequest{
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct VoteResponse{
-    term:u64,
-    vote_granted:bool,
+    pub term:u64,
+    pub vote_granted:bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
