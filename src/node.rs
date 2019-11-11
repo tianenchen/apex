@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::sync::Mutex;
+use std::sync::Arc;
 use futures::{channel::mpsc, select, FutureExt, SinkExt};
 use std::time::Duration;
 use async_std::{
@@ -9,23 +11,26 @@ use async_std::{
 };
 use crate::log::RaftLog;
 use crate::storage::StateMachine;
-use crate::net::{Request,VoteRequest,RequestType};
+use crate::net::{Request,VoteRequest,AppendEntriesRequest,RequestType};
+
+const MaxLogEntriesPerRequest :u64 = 100;
 
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type Peers = Vec<RefCell<PeerServer>>; 
+type Peers = Vec<Box<PeerServer>>; 
 
 #[derive(Debug,PartialEq)]
 enum NodeState{
     FOLLOWER, CANDIDATE, LEADER
 }
 
-#[derive(Debug,PartialEq)]
+#[derive(Debug)]
 pub struct RaftNode{
     state : NodeState,
     server_id : String,
     leader_id : Option<String>,
+    commit_index : u64,
     current_term : u64,
     voted_for : Option<String>,
     peers : Peers,
@@ -60,6 +65,7 @@ impl RaftNode {
         RaftNode{
             state:NodeState::FOLLOWER,
             leader_id:None,
+            commit_index:0,
             current_term:0,
             voted_for:None,
             logs: RaftLog::new(last_index),
@@ -86,7 +92,7 @@ impl RaftNode {
                 Err(_)=>{
                     //out of time slice
                     loop{
-                        if io::timeout(Duration::from_millis(300),self.request_vote()).await.is_ok() {
+                        if io::timeout(Duration::from_millis(300),self.vote()).await.is_ok() {
                             break;
                         }
                         println!("no result");
@@ -119,11 +125,10 @@ impl RaftNode {
         self.state=NodeState::CANDIDATE;
     }
 
-    async fn request_vote(&mut self)->std::io::Result<()>{
+    async fn vote(&mut self)->std::io::Result<()>{
         self.pre_vote();
         let request = VoteRequest::new(self.current_term, &self.server_id,self.logs.get_last_index(),self.logs.get_last_term());
-        let peers = self.peers.iter().map(|i|{
-            let mut peer = i.borrow_mut();
+        let peers = self.peers.iter_mut().map(|peer|{
             peer.vote_granted = false;
             peer.end_point.clone()
         }).collect::<std::collections::HashSet<String>>();
@@ -154,8 +159,45 @@ impl RaftNode {
         Ok(())
     }
 
-    fn become_leader(&mut self){
+    fn is_leader(&self)->bool{
+        match &self.leader_id{
+            Some(leader_id) if leader_id == &self.server_id => true,
+            _ => false,
+        }
+    }
 
+    fn become_leader(&mut self){
+        if self.state == NodeState::LEADER{
+            panic!("This should not happen .");
+        }
+        self.leader_id = Some((&self.server_id).to_string());
+        self.state = NodeState::LEADER;
+        let last_index = self.logs.get_last_index();
+        self.peers.iter_mut().for_each(|peer|{
+            peer.next_index =  last_index+1;
+        });
+    }
+
+    // async fn heartbeat(&mut self,mut peer :&mut Box<PeerServer>){
+
+    // }
+
+    async fn append_entries(&mut self){
+        for peer in self.peers.iter_mut(){
+            let prev_log_index = peer.next_index - 1;
+            let last_index = std::cmp::min(self.logs.get_last_index(),MaxLogEntriesPerRequest+prev_log_index);
+            let prev_log_term = self.logs.get_log_entry(prev_log_index).term;
+            let request = AppendEntriesRequest::new(self.current_term,&self.server_id,prev_log_index, prev_log_term, self.logs.get_log_entrys(peer.next_index,last_index), self.commit_index);
+            if let Ok(resp) = request.send(&peer.end_point).await{
+                if resp.success{
+                    peer.match_index = last_index;
+                    peer.next_index = last_index + 1;
+                }
+                else{
+                    peer.next_index -=  1;
+                }
+            }
+        }
     }
 
     async fn handle_connection(mut producer: Sender<Request> ,mut stream : TcpStream)->Result<()>{

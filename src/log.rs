@@ -1,9 +1,9 @@
 use serde::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize, Debug,PartialEq)]
+#[derive(Serialize, Deserialize, Debug,PartialEq,Clone)]
 pub struct LogEntry{
     index :u64,
-    term :u64,
+    pub term :u64,
     data :Vec<u8>,
 }
 
@@ -27,6 +27,17 @@ impl RaftLog{
             Some(last)=>last.index,
             None=>0,
         }
+    }
+
+    pub fn get_log_entry(&self,index :u64) -> &LogEntry{
+        let index = index - self.offset - 1;
+        &self.log_entrys[index as usize]
+    }
+
+    pub fn get_log_entrys(&self,start_index :u64,end_index :u64) -> &[LogEntry]{
+        let start_index = start_index - self.offset - 1;
+        let end_index = end_index - self.offset - 1;
+        &self.log_entrys[start_index as usize..end_index as usize]
     }
 
     pub fn get_last_term(&self)->u64{

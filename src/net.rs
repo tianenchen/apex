@@ -71,23 +71,23 @@ pub struct AppendEntriesRequest{
     prev_log_index:u64,
     prev_log_term:u64,
     entries:Vec<LogEntry>,
-    leader_commit:u8,
+    leader_commit:u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendEntriesResponse{
     term :u64,
-    success :bool,
+    pub success :bool,
 }
 
 impl AppendEntriesRequest{
-    pub fn new(term :u64,leader_id: &str,prev_log_index:u64,prev_log_term:u64,entries:Vec<LogEntry>,leader_commit:u8) -> Self{
+    pub fn new(term :u64,leader_id: &str,prev_log_index:u64,prev_log_term:u64,entries:&[LogEntry],leader_commit:u64) -> Self{
         AppendEntriesRequest{
             term ,
             leader_id:leader_id.to_string(),
             prev_log_index,
             prev_log_term,
-            entries,
+            entries: entries.to_vec(),
             leader_commit,
         }
     }
