@@ -1,11 +1,8 @@
-use std::cell::RefCell;
-use std::sync::Mutex;
-use std::sync::Arc;
-use futures::{channel::mpsc, select, FutureExt, SinkExt};
+use futures::{channel::mpsc,SinkExt};
 use std::time::Duration;
 use async_std::{
     io,
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{TcpListener, TcpStream},
     prelude::*,
     task,
 };
@@ -13,12 +10,11 @@ use crate::log::RaftLog;
 use crate::storage::StateMachine;
 use crate::net::{Request,VoteRequest,AppendEntriesRequest,RequestType};
 
-const MaxLogEntriesPerRequest :u64 = 100;
+const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
 
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-type Peers = Vec<Box<PeerServer>>; 
 
 #[derive(Debug,PartialEq)]
 enum NodeState{
@@ -33,7 +29,7 @@ pub struct RaftNode{
     commit_index : u64,
     current_term : u64,
     voted_for : Option<String>,
-    peers : Peers,
+    peers : Vec<PeerServer>,
     logs :RaftLog,
     state_machine :StateMachine,
 }
@@ -60,7 +56,7 @@ impl PeerServer{
 
 impl RaftNode {
 
-    fn new(peers :Peers,server_id :String,state_machine :StateMachine)->Self{
+    fn new(peers :Vec<PeerServer>,server_id :String,state_machine :StateMachine)->Self{
         let last_index = state_machine.get_last_index();
         RaftNode{
             state:NodeState::FOLLOWER,
@@ -176,25 +172,41 @@ impl RaftNode {
         self.peers.iter_mut().for_each(|peer|{
             peer.next_index =  last_index+1;
         });
+        task::block_on(self.heartbeat());
     }
 
-    // async fn heartbeat(&mut self,mut peer :&mut Box<PeerServer>){
-
-    // }
+    async fn heartbeat(&mut self){
+        loop{
+            self.append_entries().await;
+        }
+    }
 
     async fn append_entries(&mut self){
-        for peer in self.peers.iter_mut(){
+        let (tx , mut rx) = mpsc::unbounded();
+        for (i,peer) in self.peers.iter_mut().enumerate(){
             let prev_log_index = peer.next_index - 1;
-            let last_index = std::cmp::min(self.logs.get_last_index(),MaxLogEntriesPerRequest+prev_log_index);
+            let last_index = std::cmp::min(self.logs.get_last_index(),MAX_LOG_ENTRIES_PER_REQUEST+prev_log_index);
             let prev_log_term = self.logs.get_log_entry(prev_log_index).term;
-            let request = AppendEntriesRequest::new(self.current_term,&self.server_id,prev_log_index, prev_log_term, self.logs.get_log_entrys(peer.next_index,last_index), self.commit_index);
-            if let Ok(resp) = request.send(&peer.end_point).await{
-                if resp.success{
-                    peer.match_index = last_index;
-                    peer.next_index = last_index + 1;
+            let entrys = self.logs.get_log_entrys(peer.next_index,last_index);
+            let end_point = peer.end_point.clone();
+            let server_id = self.server_id.clone();
+            let mut tx = tx.clone();
+            let term = self.current_term;
+            let leader_commit = self.commit_index;
+            task::spawn(async move{
+                let request = AppendEntriesRequest::new(term,&server_id,prev_log_index, prev_log_term,entrys,leader_commit);
+                tx.send((i,request.send(&end_point).await)).await.unwrap();
+            });
+        }
+        for _ in 0..self.peers.len(){
+            if let Some((index,Ok(res))) = rx.next().await{
+                let last_index = std::cmp::min(self.logs.get_last_index(),MAX_LOG_ENTRIES_PER_REQUEST+self.peers[index].next_index-1);
+                if res.success{
+                    self.peers[index].match_index = last_index;
+                    self.peers[index].next_index = last_index + 1;
                 }
                 else{
-                    peer.next_index -=  1;
+                    self.peers[index].next_index -=  1;
                 }
             }
         }
@@ -215,7 +227,7 @@ impl RaftNode {
     }
 }
 
-pub async fn bootstrap(addr :&str, peers : Peers) -> Result<()>{
+pub async fn bootstrap(addr :&str, peers : Vec<PeerServer>) -> Result<()>{
     let listener = TcpListener::bind(addr).await?;
     let (producer, mut consumer) = mpsc::unbounded();
     let mut raft_node = RaftNode::new(peers,addr.to_string(),StateMachine::new());
