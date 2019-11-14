@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use bincode::{deserialize, serialize};
-use async_std::{net::TcpStream, prelude::*};
+use async_std::{io,net::TcpStream, prelude::*};
 use crate::log::LogEntry;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -27,7 +27,11 @@ impl Request{
     }
 
     async fn send(self,peer :&str)->Result<Vec<u8>>{
-        let mut stream = TcpStream::connect(peer).await?;
+        println!("sending ");
+        let mut stream = io::timeout(std::time::Duration::from_millis(100),async {
+            TcpStream::connect(peer).await
+        }).await?;
+        // let mut stream = TcpStream::connect(peer).await?;
         let req = serialize(&self)?;
         stream.write_all(&req[..]).await?;
         let mut buf = vec![];
@@ -50,7 +54,7 @@ impl Request{
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug,Clone)]
 pub struct VoteRequest{
     term:u64,
     candidate_id:String,
@@ -70,7 +74,7 @@ pub struct AppendEntriesRequest{
     leader_id:String,
     prev_log_index:u64,
     prev_log_term:u64,
-    entries:Vec<LogEntry>,
+    entries:Option<Vec<LogEntry>>,
     leader_commit:u64,
 }
 
@@ -81,7 +85,7 @@ pub struct AppendEntriesResponse{
 }
 
 impl AppendEntriesRequest{
-    pub fn new(term :u64,leader_id: &str,prev_log_index:u64,prev_log_term:u64,entries:Vec<LogEntry>,leader_commit:u64) -> Self{
+    pub fn new(term :u64,leader_id: &str,prev_log_index:u64,prev_log_term:u64,entries:Option<Vec<LogEntry>>,leader_commit:u64) -> Self{
         AppendEntriesRequest{
             term ,
             leader_id:leader_id.to_string(),
@@ -95,6 +99,10 @@ impl AppendEntriesRequest{
     pub async fn send(&self,peer :&str)->Result<AppendEntriesResponse>{
         Request::append_entries(&self,peer).await
     }
+}
+
+struct AppendEntriesRequestArgs{
+
 }
 
 impl VoteRequest{

@@ -29,15 +29,22 @@ impl RaftLog{
         }
     }
 
-    pub fn get_log_entry(&self,index :u64) -> LogEntry{
-        let index = index - self.offset - 1;
-        self.log_entrys[index as usize].clone()
+    pub fn get_log_term(&self,index :u64) -> u64{
+        let index = index - self.offset;
+        match self.log_entrys.get(index as usize){
+            Some(item) => item.term,
+            None => 0,
+        }
     }
 
-    pub fn get_log_entrys(&self,start_index :u64,end_index :u64) -> Vec<LogEntry>{
-        let start_index = start_index - self.offset - 1;
-        let end_index = end_index - self.offset - 1;
-        self.log_entrys[start_index as usize..end_index as usize].to_vec()
+    pub fn get_log_entrys(&self,start_index :u64,end_index :u64) -> Option<Vec<LogEntry>>{
+        println!("start_index : {} , end_index :{}", start_index,end_index);
+        let start_index = start_index - self.offset;
+        let end_index = end_index - self.offset;
+        if start_index >= end_index{
+            return None;
+        }
+        Some(self.log_entrys[start_index as usize..=end_index as usize].to_vec())
     }
 
     pub fn get_last_term(&self)->u64{

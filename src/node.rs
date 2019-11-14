@@ -1,10 +1,12 @@
-use futures::{channel::mpsc,SinkExt};
+use futures::{channel::mpsc,SinkExt,select,FutureExt};
 use std::time::Duration;
+use std::io::{ Error , ErrorKind::Interrupted };
 use async_std::{
     io,
     net::{TcpListener, TcpStream},
     prelude::*,
     task,
+    stream,
 };
 use crate::log::RaftLog;
 use crate::storage::StateMachine;
@@ -33,7 +35,6 @@ pub struct RaftNode{
     logs :RaftLog,
     state_machine :StateMachine,
 }
-
 
 #[derive(Debug,Hash,PartialEq,Eq)]
 pub struct PeerServer{
@@ -73,28 +74,42 @@ impl RaftNode {
 
     async fn receive(&mut self,events: &mut Receiver<Request>){
         loop{
-            let events = io::timeout(Duration::from_millis(300),async {
-                loop{
-                    match events.next().await{
-                        Some(event)=>{
-                            return Ok(event);
-                        },
-                        None=>continue,
-                    }
-                }
+            let event = io::timeout(Duration::from_millis(300),async {
+                events.next().await.ok_or(Error::from(Interrupted))
             }).await;
-            match events{
-                Ok(events)=>self.handle_request(events).await,
+            match event{
+                Ok(event)=>self.handle_request(event).await,
                 Err(_)=>{
                     //out of time slice
-                    loop{
-                        if io::timeout(Duration::from_millis(300),self.vote()).await.is_ok() {
-                            break;
-                        }
-                        println!("no result");
-                    }
+                    while io::timeout(Duration::from_millis(1000),self.vote()).await.is_err() {}
                     //finally , become leader or follower
+                    match self.state{
+                        NodeState::LEADER => {
+                            self.become_leader();
+                            self.serve(events).await;
+                        },
+                        _ => continue,
+                    }
                 },
+            }
+        }
+    }
+
+    async fn serve(&mut self , events: &mut Receiver<Request>){
+        let mut interval = stream::interval(Duration::from_secs(1));
+        loop{
+            select!{
+                heartbeat = interval.next().fuse() =>{
+                    self.append_entries().await;
+                },
+                append_entries = events.next().fuse() =>{
+                    //todo deal client request
+                    self.append_entries().await;
+                    interval = stream::interval(Duration::from_secs(1));
+                },
+                complete => {
+                    
+                }
             }
         }
     }
@@ -112,47 +127,45 @@ impl RaftNode {
         }
     }
 
-    fn pre_vote(&mut self){
-        if self.state==NodeState::LEADER{
-            panic!("during leader election timer, this should not happen!");
-        }
+    async fn vote(&mut self)->io::Result<()>{
         self.current_term+=1;
         self.voted_for=Some((&self.server_id).to_string());
         self.state=NodeState::CANDIDATE;
-    }
-
-    async fn vote(&mut self)->std::io::Result<()>{
-        self.pre_vote();
+        let (tx, mut rx) = mpsc::unbounded();
         let request = VoteRequest::new(self.current_term, &self.server_id,self.logs.get_last_index(),self.logs.get_last_term());
-        let peers = self.peers.iter_mut().map(|peer|{
+        for peer in &mut self.peers[..]{
             peer.vote_granted = false;
-            peer.end_point.clone()
-        }).collect::<std::collections::HashSet<String>>();
-        let mut vote_granted_num = 1;
-        for peer in &peers{
-            match request.send(&peer).await{
+            let end_point = peer.end_point.clone();
+            println!("send request : {}",end_point);
+            let mut tx = tx.clone();
+            let request = request.clone();
+            task::spawn(async move{
+                tx.send(request.send(&end_point).await).await.unwrap();
+            });
+        }
+        let mut vote_granted_num = 0;
+        while let Some(resp) = rx.next().await{
+            match resp{
                 Ok(resp) if resp.term>self.current_term =>{
-                    println!("the resp term > current term");
-                    println!("become followeer");
-                    break;
+                    self.state = NodeState::FOLLOWER;
+                    return Ok(())
                 },
                 Ok(resp) if resp.vote_granted =>{
                     vote_granted_num+=1;
-                    if vote_granted_num > (&peers.len()+1)/2{
-                        println!("Win !!!");
-                        println!("become leader");
-                        self.become_leader()
+                    if vote_granted_num > (&self.peers.len()+1)/2{
+                        self.state = NodeState::LEADER;
+                        return Ok(())
                     }
                 },
                 Ok(_) => {
                     println!("Let me down");
                 },
                 Err(_)=>{
-                    println!("oops , I can't parse the response ");
+                    println!("oops , request fail");
                 }
             }
         }
-        Ok(())
+        Err(Error::from(Interrupted))
     }
 
     fn is_leader(&self)->bool{
@@ -163,22 +176,12 @@ impl RaftNode {
     }
 
     fn become_leader(&mut self){
-        if self.state == NodeState::LEADER{
-            panic!("This should not happen .");
-        }
         self.leader_id = Some((&self.server_id).to_string());
         self.state = NodeState::LEADER;
         let last_index = self.logs.get_last_index();
         self.peers.iter_mut().for_each(|peer|{
             peer.next_index =  last_index+1;
         });
-        task::block_on(self.heartbeat());
-    }
-
-    async fn heartbeat(&mut self){
-        loop{
-            self.append_entries().await;
-        }
     }
 
     async fn append_entries(&mut self){
@@ -186,29 +189,35 @@ impl RaftNode {
         for (i,peer) in self.peers.iter_mut().enumerate(){
             let prev_log_index = peer.next_index - 1;
             let last_index = std::cmp::min(self.logs.get_last_index(),MAX_LOG_ENTRIES_PER_REQUEST+prev_log_index);
-            let prev_log_term = self.logs.get_log_entry(prev_log_index).term;
+            let prev_log_term = self.logs.get_log_term(prev_log_index);
             let entrys = self.logs.get_log_entrys(peer.next_index,last_index);
             let end_point = peer.end_point.clone();
             let server_id = self.server_id.clone();
-            let mut tx = tx.clone();
             let term = self.current_term;
             let leader_commit = self.commit_index;
+            let mut tx = tx.clone();
             task::spawn(async move{
                 let request = AppendEntriesRequest::new(term,&server_id,prev_log_index, prev_log_term,entrys,leader_commit);
                 tx.send((i,request.send(&end_point).await)).await.unwrap();
             });
         }
-        for _ in 0..self.peers.len(){
-            if let Some((index,Ok(res))) = rx.next().await{
-                let last_index = std::cmp::min(self.logs.get_last_index(),MAX_LOG_ENTRIES_PER_REQUEST+self.peers[index].next_index-1);
-                if res.success{
-                    self.peers[index].match_index = last_index;
-                    self.peers[index].next_index = last_index + 1;
-                }
-                else{
-                    self.peers[index].next_index -=  1;
-                }
+        if let Some((index,resp)) = rx.next().await{
+            match resp{
+                Ok(res)=>{
+                    let last_index = std::cmp::min(self.logs.get_last_index(),MAX_LOG_ENTRIES_PER_REQUEST+self.peers[index].next_index-1);
+                    if res.success{
+                        self.peers[index].match_index = last_index;
+                        self.peers[index].next_index = last_index + 1;
+                    }
+                    else{
+                        self.peers[index].next_index -=  1;
+                    }
+                },
+                Err(_)=>{
+                    println!("oops , request fail");
+                },
             }
+
         }
     }
 

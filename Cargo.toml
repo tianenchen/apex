@@ -7,7 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-std = "*"
-futures-preview = { version = "=0.3.0-alpha.19", features = ["async-await"] }
+async-std = { version = "1.0.1" , features = ["unstable"] }
+futures = "0.3.1"
 serde = { version = "*"  , features = ["derive"] }
 bincode = "*"
