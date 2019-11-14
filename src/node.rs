@@ -14,6 +14,8 @@ use crate::net::{Request,VoteRequest,AppendEntriesRequest,RequestType};
 
 const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
 
+const HEART_BEAT_TIMEOUT_MS :u64 = 500;
+
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -96,7 +98,8 @@ impl RaftNode {
     }
 
     async fn serve(&mut self , events: &mut Receiver<Request>){
-        let mut interval = stream::interval(Duration::from_secs(1));
+        let gap = Duration::from_millis(HEART_BEAT_TIMEOUT_MS);
+        let mut interval = stream::interval(gap);
         loop{
             select!{
                 heartbeat = interval.next().fuse() =>{
@@ -105,7 +108,7 @@ impl RaftNode {
                 append_entries = events.next().fuse() =>{
                     //todo deal client request
                     self.append_entries().await;
-                    interval = stream::interval(Duration::from_secs(1));
+                    interval = stream::interval(gap);
                 },
                 complete => {
                     
@@ -201,7 +204,7 @@ impl RaftNode {
                 tx.send((i,request.send(&end_point).await)).await.unwrap();
             });
         }
-        if let Some((index,resp)) = rx.next().await{
+        while let Some((index,resp)) = rx.next().await{
             match resp{
                 Ok(res)=>{
                     let last_index = std::cmp::min(self.logs.get_last_index(),MAX_LOG_ENTRIES_PER_REQUEST+self.peers[index].next_index-1);
@@ -217,7 +220,6 @@ impl RaftNode {
                     println!("oops , request fail");
                 },
             }
-
         }
     }
 
