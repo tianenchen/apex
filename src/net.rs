@@ -9,6 +9,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 pub enum RequestType{
     Vote,
     AppendEntries,
+    Message,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

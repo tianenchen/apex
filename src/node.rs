@@ -9,7 +9,7 @@ use async_std::{
     stream,
 };
 use crate::log::RaftLog;
-use crate::storage::StateMachine;
+use crate::storage::{StateMachine,MemKVStateMachine};
 use crate::net::{Request,VoteRequest,AppendEntriesRequest,RequestType};
 
 const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
@@ -19,14 +19,14 @@ const HEART_BEAT_TIMEOUT_MS :u64 = 500;
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type OriginRequest = (Request,TcpStream);
 
 #[derive(Debug,PartialEq)]
 enum NodeState{
     FOLLOWER, CANDIDATE, LEADER
 }
 
-#[derive(Debug)]
-pub struct RaftNode{
+pub struct RaftNode<T:StateMachine>{
     state : NodeState,
     server_id : String,
     leader_id : Option<String>,
@@ -35,7 +35,7 @@ pub struct RaftNode{
     voted_for : Option<String>,
     peers : Vec<PeerServer>,
     logs :RaftLog,
-    state_machine :StateMachine,
+    state_machine :T,
 }
 
 #[derive(Debug,Hash,PartialEq,Eq)]
@@ -57,9 +57,8 @@ impl PeerServer{
     }
 }
 
-impl RaftNode {
-
-    fn new(peers :Vec<PeerServer>,server_id :String,state_machine :StateMachine)->Self{
+impl <T :StateMachine> RaftNode<T> {
+    fn new(peers :Vec<PeerServer>,server_id :String, state_machine : T )->Self{
         let last_index = state_machine.get_last_index();
         RaftNode{
             state:NodeState::FOLLOWER,
@@ -74,7 +73,7 @@ impl RaftNode {
         }
     }
 
-    async fn receive(&mut self,events: &mut Receiver<Request>){
+    async fn receive(&mut self,events: &mut Receiver<OriginRequest>){
         loop{
             let event = io::timeout(Duration::from_millis(300),async {
                 events.next().await.ok_or(Error::from(Interrupted))
@@ -97,7 +96,7 @@ impl RaftNode {
         }
     }
 
-    async fn serve(&mut self , events: &mut Receiver<Request>){
+    async fn serve(&mut self , events: &mut Receiver<OriginRequest>){
         let gap = Duration::from_millis(HEART_BEAT_TIMEOUT_MS);
         let mut interval = stream::interval(gap);
         loop{
@@ -117,13 +116,17 @@ impl RaftNode {
         }
     }
 
-    async fn handle_request(&mut self,req:Request){
-        match req.rtype{
+    async fn handle_request(&mut self,req:OriginRequest){
+        match req.0.rtype{
             RequestType::Vote=>{
                 println!("vote");
                 //todo
             },
             RequestType::AppendEntries=>{
+                println!("append entriess");
+                //todo
+            },
+            RequestType::Message=>{
                 println!("append entriess");
                 //todo
             },
@@ -223,35 +226,32 @@ impl RaftNode {
         }
     }
 
-    async fn handle_connection(mut producer: Sender<Request> ,mut stream : TcpStream)->Result<()>{
-        //此处处理接受到的请求
-        //所有的外部调用由这里处理
-        //可能存在的请求有
-        //1. 投票请求
-        //2. 日志追加请求
-        //3. 外部客户端查询状态请求
-        let mut buf : [u8;256] = [0;256];
-        if let Ok(_n) = stream.read(&mut buf).await {
-            // producer.send(RequestType::AppendEntries).await.unwrap();
-        }
-        Ok(())
-    }
+
 }
 
 pub async fn bootstrap(addr :&str, peers : Vec<PeerServer>) -> Result<()>{
     let listener = TcpListener::bind(addr).await?;
     let (producer, mut consumer) = mpsc::unbounded();
-    let mut raft_node = RaftNode::new(peers,addr.to_string(),StateMachine::new());
+    let mut raft_node = RaftNode::new(peers,addr.to_string(),MemKVStateMachine::default());
     let consumer = task::spawn(async move{
         raft_node.receive(&mut consumer).await;
     });
     let mut incoming = listener.incoming();
     while let Some(Ok(stream)) = incoming.next().await{
         println!("Accepting from: {}", stream.peer_addr()?);
-        spawn_and_log_error(RaftNode::handle_connection(producer.clone(),stream));
+        spawn_and_log_error(handle_connection(producer.clone(),stream));
     }
     drop(producer);
     consumer.await;
+    Ok(())
+}
+
+async fn handle_connection(mut producer: Sender<OriginRequest> ,mut stream : TcpStream)->Result<()>{
+    let mut buf = vec![];
+    if let Ok(_n) = stream.read_to_end(&mut buf).await {
+        let req = Request::parse(&buf)?;
+        producer.send((req,stream)).await?;
+    }
     Ok(())
 }
 

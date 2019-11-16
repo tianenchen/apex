@@ -7,6 +7,7 @@ mod net;
 mod log;
 mod storage;
 
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn main(){
     let addr = env::args().nth(1).unwrap_or_else(|| "127.0.0.1:8080".to_string());
