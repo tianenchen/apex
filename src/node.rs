@@ -11,6 +11,7 @@ use async_std::{
 use crate::log::RaftLog;
 use crate::storage::{StateMachine,MemKVStateMachine};
 use crate::net::{Request,VoteRequest,AppendEntriesRequest,RequestType};
+use crate::common::Result;
 
 const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
 
@@ -18,7 +19,6 @@ const HEART_BEAT_TIMEOUT_MS :u64 = 500;
 
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type OriginRequest = (Request,TcpStream);
 
 #[derive(Debug,PartialEq)]
@@ -33,22 +33,22 @@ pub struct RaftNode<T:StateMachine>{
     commit_index : u64,
     current_term : u64,
     voted_for : Option<String>,
-    peers : Vec<PeerServer>,
+    peers : Vec<Peer>,
     logs :RaftLog,
     state_machine :T,
 }
 
 #[derive(Debug,Hash,PartialEq,Eq)]
-pub struct PeerServer{
+pub struct Peer{
     end_point:String,
     vote_granted:bool,
     next_index:u64,
     match_index:u64,
 }
 
-impl PeerServer{
+impl Peer{
     pub fn new(end_point:&str)->Self{
-        PeerServer{
+        Peer{
             end_point:end_point.to_string(),
             vote_granted:false,
             next_index:1,
@@ -58,7 +58,7 @@ impl PeerServer{
 }
 
 impl <T :StateMachine> RaftNode<T> {
-    fn new(peers :Vec<PeerServer>,server_id :String, state_machine : T )->Self{
+    fn new(peers :Vec<Peer>,server_id :String, state_machine : T )->Self{
         let last_index = state_machine.get_last_index();
         RaftNode{
             state:NodeState::FOLLOWER,
@@ -76,7 +76,7 @@ impl <T :StateMachine> RaftNode<T> {
     async fn receive(&mut self,events: &mut Receiver<OriginRequest>){
         loop{
             let event = io::timeout(Duration::from_millis(300),async {
-                events.next().await.ok_or(Error::from(Interrupted))
+                events.next().await.ok_or_else(|| Error::from(Interrupted))
             }).await;
             match event{
                 Ok(event)=>self.handle_request(event).await,
@@ -229,7 +229,7 @@ impl <T :StateMachine> RaftNode<T> {
 
 }
 
-pub async fn bootstrap(addr :&str, peers : Vec<PeerServer>) -> Result<()>{
+pub async fn bootstrap(addr :&str, peers : Vec<Peer>) -> Result<()>{
     let listener = TcpListener::bind(addr).await?;
     let (producer, mut consumer) = mpsc::unbounded();
     let mut raft_node = RaftNode::new(peers,addr.to_string(),MemKVStateMachine::default());

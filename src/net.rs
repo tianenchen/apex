@@ -2,8 +2,7 @@ use serde::{Serialize, Deserialize};
 use bincode::{deserialize, serialize};
 use async_std::{io,net::TcpStream, prelude::*};
 use crate::log::LogEntry;
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+use crate::common::Result;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RequestType{
