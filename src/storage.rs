@@ -10,10 +10,10 @@ pub struct Snapshot{
 pub trait StateMachine{
     fn get_last_index(&self)->u64;
     fn get_last_term(&self)->u64;
-    fn get(&self,key :&[u8])->Option<Vec<u8>>;
-    fn put(&mut self,key :Vec<u8>,value :Vec<u8>)->bool;
+    fn query(&self,key :&[u8])->Option<Vec<u8>>;
+    fn apply(&mut self,key :Vec<u8>,value :Vec<u8>)->bool;
     fn snapshot(&mut self)->Snapshot;
-    fn apply_snapshot(&mut self,snapshot :Snapshot)->std::io::Result<()>;
+    fn restore_snapshot(&mut self,snapshot :Snapshot)->std::io::Result<()>;
 }
 
 
@@ -44,19 +44,35 @@ impl StateMachine for MemKVStateMachine{
         self.last_term
     }
 
-    fn get(&self,key :&[u8])->Option<Vec<u8>>{
+    fn query(&self,key :&[u8])->Option<Vec<u8>>{
         match self.state.get(key){
             Some(value) => Some(value.clone()),
             None => None,
         }
     }
-    fn put(&mut self,key :Vec<u8>,value :Vec<u8>)->bool{
+    fn apply(&mut self,key :Vec<u8>,value :Vec<u8>)->bool{
         self.state.insert(key.to_vec(),value.to_vec()).is_some()
     }
     fn snapshot(&mut self)->Snapshot{
-        Snapshot::default()
+        Snapshot{
+            last_index:self.last_index,
+            last_term:self.last_term,
+        }
     }
-    fn apply_snapshot(&mut self,snapshot :Snapshot)->std::io::Result<()>{
+    fn restore_snapshot(&mut self,_snapshot :Snapshot)->std::io::Result<()>{
         Ok(())
     }
 }
+
+mod tests{
+    #[test]
+    fn test1() {
+        use super::{StateMachine,MemKVStateMachine};
+        let mut state_mechine = MemKVStateMachine::default();
+        state_mechine.apply(b"hello".to_vec(), b"world".to_vec());
+        let res = state_mechine.query(b"hello");
+        assert_eq!(res.unwrap(),b"world");
+    }
+}
+
+
