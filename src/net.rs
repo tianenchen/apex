@@ -14,7 +14,7 @@ pub enum RequestType{
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request{
     pub rtype:RequestType,
-    body:Vec<u8>,
+    pub body:Vec<u8>,
 }
 
 impl Request{
@@ -24,6 +24,14 @@ impl Request{
 
     pub fn parse(package : &[u8])->Result<Self>{
         Ok(deserialize(&package[..])?)
+    }
+
+    pub fn to_vote_request(body :&[u8])->Result<VoteRequest>{
+        Ok(deserialize(&body[..])?)
+    }
+    
+    pub fn to_append_request(body :&[u8])->Result<AppendEntriesRequest>{
+        Ok(deserialize(&body[..])?)
     }
 
     async fn send(self,peer :&str)->Result<Vec<u8>>{
@@ -56,10 +64,10 @@ impl Request{
 
 #[derive(Serialize, Deserialize, Debug,Clone)]
 pub struct VoteRequest{
-    term:u64,
-    candidate_id:String,
-    last_log_index:u64,
-    last_log_term:u64,
+    pub term:u64,
+    pub candidate_id:String,
+    pub last_log_index:u64,
+    pub last_log_term:u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -68,20 +76,38 @@ pub struct VoteResponse{
     pub vote_granted:bool,
 }
 
+impl VoteResponse{
+    pub fn new(term :u64,vote_granted :bool)->Vec<u8>{
+        let resp = VoteResponse{
+            term,vote_granted
+        };
+        serialize(&resp).unwrap()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendEntriesRequest{
-    term :u64,
-    leader_id:String,
-    prev_log_index:u64,
-    prev_log_term:u64,
-    entries:Option<Vec<LogEntry>>,
-    leader_commit:u64,
+    pub term :u64,
+    pub leader_id:String,
+    pub prev_log_index:u64,
+    pub prev_log_term:u64,
+    pub entries:Option<Vec<LogEntry>>,
+    pub leader_commit:u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendEntriesResponse{
     term :u64,
     pub success :bool,
+}
+
+impl AppendEntriesResponse{
+    pub fn new(term :u64,success :bool)->Vec<u8>{
+        let resp = AppendEntriesResponse{
+            term,success
+        };
+        serialize(&resp).unwrap()
+    }
 }
 
 impl AppendEntriesRequest{

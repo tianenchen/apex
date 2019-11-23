@@ -10,7 +10,7 @@ use async_std::{
 };
 use crate::log::RaftLog;
 use crate::storage::{StateMachine,MemKVStateMachine};
-use crate::net::{Request,VoteRequest,AppendEntriesRequest,RequestType};
+use crate::net::{Request,VoteRequest,AppendEntriesRequest,VoteResponse,AppendEntriesResponse,RequestType};
 use crate::common::Result;
 
 const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
@@ -19,7 +19,19 @@ const HEART_BEAT_TIMEOUT_MS :u64 = 500;
 
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
-type OriginRequest = (Request,TcpStream);
+
+struct OriginRequest{
+    request :Request,
+    source :TcpStream,
+}
+
+impl OriginRequest{
+    fn new(request:Request,source:TcpStream)->Self{
+        OriginRequest{
+            request,source,
+        }
+    }
+}
 
 #[derive(Debug,PartialEq)]
 enum NodeState{
@@ -79,7 +91,7 @@ impl <T :StateMachine> RaftNode<T> {
                 events.next().await.ok_or_else(|| Error::from(Interrupted))
             }).await;
             match event{
-                Ok(event)=>self.handle_request(event).await,
+                Ok(mut event)=>self.handle_request(&mut event).await.unwrap(),
                 Err(_)=>{
                     //out of time slice
                     while io::timeout(Duration::from_millis(1000),self.vote()).await.is_err() {}
@@ -104,8 +116,8 @@ impl <T :StateMachine> RaftNode<T> {
                 heartbeat = interval.next().fuse() =>{
                     self.append_entries().await;
                 },
-                append_entries = events.next().fuse() =>{
-                    //todo deal client request
+                request = events.next().fuse() =>{
+                    self.handle_request(&mut request.unwrap()).await.unwrap();
                     self.append_entries().await;
                     interval = stream::interval(gap);
                 },
@@ -116,21 +128,54 @@ impl <T :StateMachine> RaftNode<T> {
         }
     }
 
-    async fn handle_request(&mut self,req:OriginRequest){
-        match req.0.rtype{
+    async fn handle_request(&mut self,req:&mut OriginRequest)->Result<()>{
+        match req.request.rtype{
             RequestType::Vote=>{
-                println!("vote");
-                //todo
+                let vote = Request::to_vote_request(&req.request.body)?;
+                if vote.term < self.current_term {
+                    let mut resp = VoteResponse::new(self.current_term,false);
+                    req.source.write_all(&mut resp);
+                    return Ok(())
+                }
+                else if (self.voted_for == None || self.voted_for == Some(vote.candidate_id))
+                        &&vote.last_log_index<=self.logs.latest_log_index()
+                        &&vote.last_log_term<=self.logs.latest_log_term(){
+                    let mut resp = VoteResponse::new(self.current_term,true);
+                    req.source.write_all(&mut resp);
+                    return Ok(())
+                }
             },
             RequestType::AppendEntries=>{
-                println!("append entriess");
-                //todo
+                let append_entries = Request::to_append_request(&req.request.body)?;
+                if append_entries.term < self.current_term {
+                    let mut resp = AppendEntriesResponse::new(self.current_term,false);
+                    req.source.write_all(&mut resp);
+                    return Ok(())
+                }
+                let entry = self.logs.entry(append_entries.prev_log_index).unwrap();
+                if self.logs.latest_log_term()!=entry.term{
+                    let mut resp = AppendEntriesResponse::new(self.current_term,false);
+                    req.source.write_all(&mut resp);
+                    return Ok(())
+                }
+                if let Some(entries) = append_entries.entries{
+                    let last_index = entries.last().unwrap().index;
+                    self.logs.append(append_entries.prev_log_index,entries);
+                    if append_entries.leader_commit > self.commit_index{
+                        //todo write to state machine
+                        self.commit_index = std::cmp::min(append_entries.leader_commit, last_index);
+                    }
+                }
+                let mut resp = VoteResponse::new(self.current_term,true);
+                req.source.write_all(&mut resp);
+                return Ok(())
             },
             RequestType::Message=>{
                 println!("append entriess");
                 //todo
             },
         }
+        Ok(())
     }
 
     async fn vote(&mut self)->io::Result<()>{
@@ -138,7 +183,7 @@ impl <T :StateMachine> RaftNode<T> {
         self.voted_for=Some((&self.server_id).to_string());
         self.state=NodeState::CANDIDATE;
         let (tx, mut rx) = mpsc::unbounded();
-        let request = VoteRequest::new(self.current_term, &self.server_id,self.logs.get_last_index(),self.logs.get_last_term());
+        let request = VoteRequest::new(self.current_term, &self.server_id,self.logs.latest_log_index(),self.logs.latest_log_term());
         for peer in &mut self.peers[..]{
             peer.vote_granted = false;
             let end_point = peer.end_point.clone();
@@ -184,7 +229,7 @@ impl <T :StateMachine> RaftNode<T> {
     fn become_leader(&mut self){
         self.leader_id = Some((&self.server_id).to_string());
         self.state = NodeState::LEADER;
-        let last_index = self.logs.get_last_index();
+        let last_index = self.logs.latest_log_index();
         self.peers.iter_mut().for_each(|peer|{
             peer.next_index =  last_index+1;
         });
@@ -194,9 +239,9 @@ impl <T :StateMachine> RaftNode<T> {
         let (tx , mut rx) = mpsc::unbounded();
         for (i,peer) in self.peers.iter_mut().enumerate(){
             let prev_log_index = peer.next_index - 1;
-            let last_index = std::cmp::min(self.logs.get_last_index(),MAX_LOG_ENTRIES_PER_REQUEST+prev_log_index);
-            let prev_log_term = self.logs.get_log_term(prev_log_index);
-            let entrys = self.logs.get_log_entrys(peer.next_index,last_index);
+            let last_index = std::cmp::min(self.logs.latest_log_index(),MAX_LOG_ENTRIES_PER_REQUEST+prev_log_index);
+            let prev_log_term = self.logs.term(prev_log_index);
+            let entrys = self.logs.entries(peer.next_index,last_index);
             let end_point = peer.end_point.clone();
             let server_id = self.server_id.clone();
             let term = self.current_term;
@@ -210,7 +255,7 @@ impl <T :StateMachine> RaftNode<T> {
         while let Some((index,resp)) = rx.next().await{
             match resp{
                 Ok(res)=>{
-                    let last_index = std::cmp::min(self.logs.get_last_index(),MAX_LOG_ENTRIES_PER_REQUEST+self.peers[index].next_index-1);
+                    let last_index = std::cmp::min(self.logs.latest_log_index(),MAX_LOG_ENTRIES_PER_REQUEST+self.peers[index].next_index-1);
                     if res.success{
                         self.peers[index].match_index = last_index;
                         self.peers[index].next_index = last_index + 1;
@@ -250,7 +295,7 @@ async fn handle_connection(mut producer: Sender<OriginRequest> ,mut stream : Tcp
     let mut buf = vec![];
     if let Ok(_n) = stream.read_to_end(&mut buf).await {
         let req = Request::parse(&buf)?;
-        producer.send((req,stream)).await?;
+        producer.send(OriginRequest::new(req,stream)).await?;
     }
     Ok(())
 }
