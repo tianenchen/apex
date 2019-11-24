@@ -8,10 +8,10 @@ use async_std::{
     task,
     stream,
 };
-use crate::log::RaftLog;
+use crate::log::{RaftLog,LogEntry};
 use crate::storage::{StateMachine,MemKVStateMachine};
-use crate::net::{Request,VoteRequest,AppendEntriesRequest,VoteResponse,AppendEntriesResponse,RequestType};
-use crate::common::Result;
+use crate::net::{*,Reason::*};
+use crate::common::{Result};
 
 const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
 
@@ -114,7 +114,13 @@ impl <T :StateMachine> RaftNode<T> {
         loop{
             select!{
                 heartbeat = interval.next().fuse() =>{
-                    self.append_entries().await;
+                    if let Ok(()) = self.try_append_entries().await{
+                        let mut snapshot = self.state_machine.snapshot();
+                        snapshot.set_last_index(self.commit_index);
+                        snapshot.set_last_term(self.current_term);
+                        self.state_machine.take_a_snapshot(snapshot);
+                        self.logs.truncate(self.commit_index);
+                    }
                 },
                 request = events.next().fuse() =>{
                     self.handle_request(&mut request.unwrap()).await.unwrap();
@@ -129,7 +135,7 @@ impl <T :StateMachine> RaftNode<T> {
     }
 
     async fn handle_request(&mut self,req:&mut OriginRequest)->Result<()>{
-        match req.request.rtype{
+        match &req.request.req_type{
             RequestType::Vote=>{
                 let vote = Request::to_vote_request(&req.request.body)?;
                 if vote.term < self.current_term {
@@ -158,24 +164,49 @@ impl <T :StateMachine> RaftNode<T> {
                     req.source.write_all(&mut resp);
                     return Ok(())
                 }
-                if let Some(entries) = append_entries.entries{
-                    let last_index = entries.last().unwrap().index;
-                    self.logs.append(append_entries.prev_log_index,entries);
-                    if append_entries.leader_commit > self.commit_index{
-                        //todo write to state machine
-                        self.commit_index = std::cmp::min(append_entries.leader_commit, last_index);
-                    }
+                let last_index = append_entries.entries.last().unwrap().index;
+                self.logs.append(append_entries.prev_log_index,append_entries.entries);
+                if append_entries.leader_commit > self.commit_index{
+                    //TODO . write to state machine
+                    self.commit_index = std::cmp::min(append_entries.leader_commit, last_index);
                 }
                 let mut resp = VoteResponse::new(self.current_term,true);
                 req.source.write_all(&mut resp);
                 return Ok(())
             },
-            RequestType::Message=>{
-                println!("append entriess");
-                //todo
+            RequestType::Message(cmd)=>{
+                let resp = match self.is_leader(){
+                    true => {
+                        let index = self.logs.latest_log_index()+1;
+                        let log = LogEntry::new(index, self.current_term,cmd.clone());
+                        let next_index = self.logs.append(index,vec![log]);
+                        match self.try_append_entries().await{
+                            Ok(())=>{
+                                self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
+                                Response::Success
+                            },
+                            Err(_)=>Response::Fail(Timeout),
+                        }
+                    },
+                    false => {
+                        match &self.leader_id{
+                            Some(leader_id) => Response::Fail(Redirect(leader_id.clone())),
+                            None => Response::Fail(Unavailable),
+                        }
+                    },
+                };
+                req.source.write_all(&resp.serialize());
+                return Ok(())
             },
-        }
+        };
         Ok(())
+    }
+
+    async fn try_append_entries(&mut self)->io::Result<()>{
+        io::timeout(Duration::from_secs(1),async {
+            while !self.append_entries().await {} 
+            Ok(())
+        }).await
     }
 
     async fn vote(&mut self)->io::Result<()>{
@@ -235,23 +266,27 @@ impl <T :StateMachine> RaftNode<T> {
         });
     }
 
-    async fn append_entries(&mut self){
+    async fn append_entries(&mut self)->bool{
         let (tx , mut rx) = mpsc::unbounded();
         for (i,peer) in self.peers.iter_mut().enumerate(){
             let prev_log_index = peer.next_index - 1;
             let last_index = std::cmp::min(self.logs.latest_log_index(),MAX_LOG_ENTRIES_PER_REQUEST+prev_log_index);
             let prev_log_term = self.logs.term(prev_log_index);
-            let entrys = self.logs.entries(peer.next_index,last_index);
+            let entries = self.logs.entries(peer.next_index,last_index)
+                    .iter()
+                    .map(|entry| entry.clone())
+                    .collect::<Vec<LogEntry>>();
             let end_point = peer.end_point.clone();
             let server_id = self.server_id.clone();
             let term = self.current_term;
             let leader_commit = self.commit_index;
             let mut tx = tx.clone();
             task::spawn(async move{
-                let request = AppendEntriesRequest::new(term,&server_id,prev_log_index, prev_log_term,entrys,leader_commit);
+                let request = AppendEntriesRequest::new(term,&server_id,prev_log_index, prev_log_term,entries,leader_commit);
                 tx.send((i,request.send(&end_point).await)).await.unwrap();
             });
         }
+        let mut received_num = 0;
         while let Some((index,resp)) = rx.next().await{
             match resp{
                 Ok(res)=>{
@@ -259,6 +294,7 @@ impl <T :StateMachine> RaftNode<T> {
                     if res.success{
                         self.peers[index].match_index = last_index;
                         self.peers[index].next_index = last_index + 1;
+                        received_num += 1;
                     }
                     else{
                         self.peers[index].next_index -=  1;
@@ -269,9 +305,8 @@ impl <T :StateMachine> RaftNode<T> {
                 },
             }
         }
+        received_num > (&self.peers.len()+1)/2
     }
-
-
 }
 
 pub async fn bootstrap(addr :&str, peers : Vec<Peer>) -> Result<()>{

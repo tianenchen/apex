@@ -1,3 +1,4 @@
+use crate::common::Command;
 use serde::{Serialize, Deserialize};
 use bincode::{deserialize, serialize};
 use async_std::{io,net::TcpStream, prelude::*};
@@ -8,18 +9,19 @@ use crate::common::Result;
 pub enum RequestType{
     Vote,
     AppendEntries,
-    Message,
+    Message(Command),
 }
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request{
-    pub rtype:RequestType,
+    pub req_type:RequestType,
     pub body:Vec<u8>,
 }
 
 impl Request{
-    fn new(rtype:RequestType,body:Vec<u8>)->Self{
-        Request{ rtype,body }
+    fn new(req_type:RequestType,body:Vec<u8>)->Self{
+        Request{ req_type,body }
     }
 
     pub fn parse(package : &[u8])->Result<Self>{
@@ -62,12 +64,47 @@ impl Request{
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Response{
+    Success,
+    Fail(Reason)
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Reason{
+    Redirect(String),
+    InvalidArgument,
+    Timeout,
+    Unavailable,
+}
+
+impl Response{
+    pub fn serialize(self)->Vec<u8>{
+        serialize(&self).unwrap()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug,Clone)]
 pub struct VoteRequest{
     pub term:u64,
     pub candidate_id:String,
     pub last_log_index:u64,
     pub last_log_term:u64,
+}
+
+impl VoteRequest{
+    pub fn new(term:u64,candidate_id :&str,last_log_index:u64,last_log_term:u64)->Self{
+        VoteRequest{
+            term,
+            candidate_id:candidate_id.to_string(),
+            last_log_index,
+            last_log_term,
+        }
+    }
+
+    pub async fn send(&self,peer :&str)->Result<VoteResponse>{
+        Request::vote(self,peer).await
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -91,8 +128,26 @@ pub struct AppendEntriesRequest{
     pub leader_id:String,
     pub prev_log_index:u64,
     pub prev_log_term:u64,
-    pub entries:Option<Vec<LogEntry>>,
+    pub entries:Vec<LogEntry>,
     pub leader_commit:u64,
+}
+
+
+impl AppendEntriesRequest{
+    pub fn new(term :u64,leader_id: &str,prev_log_index:u64,prev_log_term:u64,entries:Vec<LogEntry>,leader_commit:u64) -> Self{
+        AppendEntriesRequest{
+            term ,
+            leader_id:leader_id.to_string(),
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit,
+        }
+    }
+
+    pub async fn send(&self,peer :&str)->Result<AppendEntriesResponse>{
+        Request::append_entries(&self,peer).await
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -110,41 +165,9 @@ impl AppendEntriesResponse{
     }
 }
 
-impl AppendEntriesRequest{
-    pub fn new(term :u64,leader_id: &str,prev_log_index:u64,prev_log_term:u64,entries:Option<Vec<LogEntry>>,leader_commit:u64) -> Self{
-        AppendEntriesRequest{
-            term ,
-            leader_id:leader_id.to_string(),
-            prev_log_index,
-            prev_log_term,
-            entries,
-            leader_commit,
-        }
-    }
 
-    pub async fn send(&self,peer :&str)->Result<AppendEntriesResponse>{
-        Request::append_entries(&self,peer).await
-    }
-}
 
-struct AppendEntriesRequestArgs{
 
-}
-
-impl VoteRequest{
-    pub fn new(term:u64,candidate_id :&str,last_log_index:u64,last_log_term:u64)->Self{
-        VoteRequest{
-            term,
-            candidate_id:candidate_id.to_string(),
-            last_log_index,
-            last_log_term,
-        }
-    }
-
-    pub async fn send(&self,peer :&str)->Result<VoteResponse>{
-        Request::vote(self,peer).await
-    }
-}
 
 
 
