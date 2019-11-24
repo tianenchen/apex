@@ -167,8 +167,9 @@ impl <T :StateMachine> RaftNode<T> {
                 let last_index = append_entries.entries.last().unwrap().index;
                 self.logs.append(append_entries.prev_log_index,append_entries.entries);
                 if append_entries.leader_commit > self.commit_index{
-                    //TODO . write to state machine
-                    self.commit_index = std::cmp::min(append_entries.leader_commit, last_index);
+                    let next_index = std::cmp::min(append_entries.leader_commit, last_index);
+                    self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
+                    self.commit_index = next_index;
                 }
                 let mut resp = VoteResponse::new(self.current_term,true);
                 req.source.write_all(&mut resp);
