@@ -1,5 +1,6 @@
 use serde::{Serialize, Deserialize};
 use crate::common::Command;
+use log::debug;
 
 #[derive(Serialize, Deserialize, Debug,PartialEq,Clone)]
 pub struct LogEntry{
@@ -15,7 +16,6 @@ impl LogEntry{
         }
     }
 }
-
 
 #[derive(Serialize, Deserialize, Debug,PartialEq)]
 pub struct RaftLog{
@@ -59,10 +59,15 @@ impl RaftLog{
     }
 
     pub fn entries(&self,start_index :u64,end_index :u64) -> &[LogEntry]{
-        println!("start_index : {} , end_index :{}", start_index,end_index);
+        debug!("start_index : {} , end_index :{}", start_index,end_index);
         let start_index = start_index - self.offset;
         let end_index = end_index - self.offset;
-        &self.log_entrys[start_index as usize..=end_index as usize]
+        if start_index<end_index{
+            &self.log_entrys[start_index as usize..=end_index as usize]
+        }
+        else {
+            &[]
+        }
     }
 
     pub fn truncate(&mut self,commited_index:u64) -> u64{

@@ -92,18 +92,18 @@ impl StateMachine for MemKVStateMachine{
     }
 }
 
-mod tests{
-    #[test]
-    fn test1() {
-        use super::*;
-        use super::LogEntry;
-        let mut state_mechine = MemKVStateMachine::default();
-        let put = Command::PUT(K::from(b"hello".to_vec()), V::from(b"world".to_vec()));
-        let logs = vec![LogEntry::new(1,1,put)];
-        state_mechine.apply(&logs);
-        let res = state_mechine.query(K::from(b"hello".to_vec()));
-        assert_eq!(res.unwrap(),V::from(b"world".to_vec()));
-    }
-}
+// mod tests{
+//     #[test]
+//     fn test1() {
+//         use super::*;
+//         use super::LogEntry;
+//         let mut state_mechine = MemKVStateMachine::default();
+//         let put = Command::PUT(K::from(b"hello".to_vec()), V::from(b"world".to_vec()));
+//         let logs = vec![LogEntry::new(1,1,put)];
+//         state_mechine.apply(&logs);
+//         let res = state_mechine.query(K::from(b"hello".to_vec()));
+//         assert_eq!(res.unwrap(),V::from(b"world".to_vec()));
+//     }
+// }
 
 

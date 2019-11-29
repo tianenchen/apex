@@ -2,8 +2,11 @@ use crate::common::Command;
 use serde::{Serialize, Deserialize};
 use bincode::{deserialize, serialize};
 use async_std::{io,net::TcpStream, prelude::*};
+use std::net::Shutdown;
 use crate::log::LogEntry;
 use crate::common::Result;
+
+const CONNECT_TIMEOUT :u64 = 50;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RequestType{
@@ -11,7 +14,6 @@ pub enum RequestType{
     AppendEntries,
     Message(Command),
 }
-
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Request{
@@ -37,14 +39,13 @@ impl Request{
     }
 
     async fn send(self,peer :&str)->Result<Vec<u8>>{
-        println!("sending ");
-        let mut stream = io::timeout(std::time::Duration::from_millis(100),async {
+        let mut stream = io::timeout(std::time::Duration::from_millis(CONNECT_TIMEOUT),async {
             TcpStream::connect(peer).await
         }).await?;
-        // let mut stream = TcpStream::connect(peer).await?;
         let req = serialize(&self)?;
         stream.write_all(&req[..]).await?;
-        let mut buf = vec![];
+        stream.shutdown(Shutdown::Write)?;
+        let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await?;
         Ok(buf)
     }
@@ -52,7 +53,7 @@ impl Request{
     async fn vote(vote :&VoteRequest,peer :&str)->Result<VoteResponse>{
         let wrap = Self::new(RequestType::Vote, serialize(&vote)?);
         let resp = wrap.send(peer).await?;
-        let resp : VoteResponse = deserialize(&resp[..])?;
+        let resp : VoteResponse = deserialize(&resp[..]).expect("deserialize fail");
         Ok(resp)
     }
 
@@ -164,11 +165,3 @@ impl AppendEntriesResponse{
         serialize(&resp).unwrap()
     }
 }
-
-
-
-
-
-
-
-

@@ -1,6 +1,8 @@
 use futures::{channel::mpsc,SinkExt,select,FutureExt};
 use std::time::Duration;
 use std::io::{ Error , ErrorKind::Interrupted };
+use rand::{thread_rng, Rng};
+use log::info;
 use async_std::{
     io,
     net::{TcpListener, TcpStream},
@@ -8,6 +10,7 @@ use async_std::{
     task,
     stream,
 };
+use std::net::Shutdown;
 use crate::log::{RaftLog,LogEntry};
 use crate::storage::{StateMachine,MemKVStateMachine};
 use crate::net::{*,Reason::*};
@@ -15,11 +18,12 @@ use crate::common::{Result};
 
 const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
 
-const HEART_BEAT_TIMEOUT_MS :u64 = 500;
+const HEART_BEAT_TIMEOUT_MS :u64 = 50;
 
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
 
+#[derive(Debug)]
 struct OriginRequest{
     request :Request,
     source :TcpStream,
@@ -87,22 +91,23 @@ impl <T :StateMachine> RaftNode<T> {
 
     async fn receive(&mut self,events: &mut Receiver<OriginRequest>){
         loop{
-            let event = io::timeout(Duration::from_millis(300),async {
+            let rng :u64 = thread_rng().gen_range(150, 300);
+            let event = io::timeout(Duration::from_millis(rng),async {
                 events.next().await.ok_or_else(|| Error::from(Interrupted))
             }).await;
             match event{
-                Ok(mut event)=>self.handle_request(&mut event).await.unwrap(),
+                Ok(mut event)=>self.handle_request(&mut event).await.expect("receive msg fail !!!!"),
                 Err(_)=>{
-                    //out of time slice
-                    while io::timeout(Duration::from_millis(1000),self.vote()).await.is_err() {}
-                    //finally , become leader or follower
-                    match self.state{
-                        NodeState::LEADER => {
-                            self.become_leader();
-                            self.serve(events).await;
-                        },
-                        _ => continue,
+                    if let Ok(()) = io::timeout(Duration::from_millis(rng-150),self.vote()).await{
+                        match self.state{
+                            NodeState::LEADER => {
+                                self.become_leader();
+                                self.serve(events).await;
+                            },
+                            _ => (),
+                        }
                     }
+                    self.voted_for = None;
                 },
             }
         }
@@ -123,57 +128,55 @@ impl <T :StateMachine> RaftNode<T> {
                     }
                 },
                 request = events.next().fuse() =>{
-                    self.handle_request(&mut request.unwrap()).await.unwrap();
+                    self.handle_request(&mut request.expect("request error")).await.expect("asdasdasdasdsd");
                     self.append_entries().await;
                     interval = stream::interval(gap);
                 },
                 complete => {
-                    
                 }
             }
         }
     }
 
     async fn handle_request(&mut self,req:&mut OriginRequest)->Result<()>{
-        match &req.request.req_type{
+        let resp = match &req.request.req_type{
             RequestType::Vote=>{
                 let vote = Request::to_vote_request(&req.request.body)?;
-                if vote.term < self.current_term {
-                    let mut resp = VoteResponse::new(self.current_term,false);
-                    req.source.write_all(&mut resp);
-                    return Ok(())
-                }
-                else if (self.voted_for == None || self.voted_for == Some(vote.candidate_id))
-                        &&vote.last_log_index<=self.logs.latest_log_index()
-                        &&vote.last_log_term<=self.logs.latest_log_term(){
-                    let mut resp = VoteResponse::new(self.current_term,true);
-                    req.source.write_all(&mut resp);
-                    return Ok(())
+                match vote{
+                    vote if vote.term < self.current_term => VoteResponse::new(self.current_term,false),
+                    vote if (self.voted_for == None || self.voted_for == Some(vote.candidate_id.clone()))
+                                &&vote.last_log_index<=self.logs.latest_log_index()
+                                &&vote.last_log_term<=self.logs.latest_log_term() 
+                     =>VoteResponse::new(self.current_term,true),
+                    _=>VoteResponse::new(self.current_term,false),
                 }
             },
             RequestType::AppendEntries=>{
-                let append_entries = Request::to_append_request(&req.request.body)?;
-                if append_entries.term < self.current_term {
-                    let mut resp = AppendEntriesResponse::new(self.current_term,false);
-                    req.source.write_all(&mut resp);
-                    return Ok(())
+                let append_entries = Request::to_append_request(&req.request.body).expect("append entries fail !!!!");
+                info!("append entries : {:?}",append_entries);
+                match append_entries {
+                    append_entries if append_entries.term < self.current_term => AppendEntriesResponse::new(self.current_term,false),
+                    append_entries => {
+                        let entry = self.logs.entry(append_entries.prev_log_index);
+                        let leader_commit = append_entries.leader_commit;
+                        match entry{
+                            Some(entry) if self.logs.latest_log_term() != entry.term => AppendEntriesResponse::new(self.current_term,false),
+                            _=> {
+                                let last_index = match append_entries.entries.last(){
+                                    Some(last) => last.index,
+                                    None => self.logs.latest_log_index(),
+                                };
+                                self.logs.append(append_entries.prev_log_index,append_entries.entries);
+                                if leader_commit > self.commit_index{
+                                    let next_index = std::cmp::min(leader_commit, last_index);
+                                    self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
+                                    self.commit_index = next_index;
+                                }
+                                VoteResponse::new(self.current_term,true)
+                            },
+                        }
+                    }
                 }
-                let entry = self.logs.entry(append_entries.prev_log_index).unwrap();
-                if self.logs.latest_log_term()!=entry.term{
-                    let mut resp = AppendEntriesResponse::new(self.current_term,false);
-                    req.source.write_all(&mut resp);
-                    return Ok(())
-                }
-                let last_index = append_entries.entries.last().unwrap().index;
-                self.logs.append(append_entries.prev_log_index,append_entries.entries);
-                if append_entries.leader_commit > self.commit_index{
-                    let next_index = std::cmp::min(append_entries.leader_commit, last_index);
-                    self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
-                    self.commit_index = next_index;
-                }
-                let mut resp = VoteResponse::new(self.current_term,true);
-                req.source.write_all(&mut resp);
-                return Ok(())
             },
             RequestType::Message(cmd)=>{
                 let resp = match self.is_leader(){
@@ -196,22 +199,17 @@ impl <T :StateMachine> RaftNode<T> {
                         }
                     },
                 };
-                req.source.write_all(&resp.serialize());
-                return Ok(())
+                resp.serialize()
             },
         };
+        req.source.write_all(&resp).await?;
+        req.source.shutdown(Shutdown::Write)?;
         Ok(())
-    }
-
-    async fn try_append_entries(&mut self)->io::Result<()>{
-        io::timeout(Duration::from_secs(1),async {
-            while !self.append_entries().await {} 
-            Ok(())
-        }).await
     }
 
     async fn vote(&mut self)->io::Result<()>{
         self.current_term+=1;
+        info!("current term : {}", self.current_term );
         self.voted_for=Some((&self.server_id).to_string());
         self.state=NodeState::CANDIDATE;
         let (tx, mut rx) = mpsc::unbounded();
@@ -219,32 +217,34 @@ impl <T :StateMachine> RaftNode<T> {
         for peer in &mut self.peers[..]{
             peer.vote_granted = false;
             let end_point = peer.end_point.clone();
-            println!("send request : {}",end_point);
             let mut tx = tx.clone();
             let request = request.clone();
             task::spawn(async move{
-                tx.send(request.send(&end_point).await).await.unwrap();
+                let _ = tx.send(request.send(&end_point).await).await;
             });
         }
-        let mut vote_granted_num = 0;
+        let mut vote_granted_num = 1;
         while let Some(resp) = rx.next().await{
             match resp{
                 Ok(resp) if resp.term>self.current_term =>{
                     self.state = NodeState::FOLLOWER;
+                    info!("peer : {} , vote granted num : {}", self.server_id ,vote_granted_num );
                     return Ok(())
                 },
                 Ok(resp) if resp.vote_granted =>{
                     vote_granted_num+=1;
+                    info!("peer : {} , vote granted num : {} , threshold : {}", self.server_id ,vote_granted_num,(&self.peers.len()+1)/2);
                     if vote_granted_num > (&self.peers.len()+1)/2{
                         self.state = NodeState::LEADER;
                         return Ok(())
                     }
                 },
                 Ok(_) => {
-                    println!("Let me down");
+                    info!("Let me down");
                 },
-                Err(_)=>{
-                    println!("oops , request fail");
+                Err(e)=>{
+                    eprint!("{}",e);
+                    info!("oops , request fail");
                 }
             }
         }
@@ -259,12 +259,20 @@ impl <T :StateMachine> RaftNode<T> {
     }
 
     fn become_leader(&mut self){
+        info!("peer : {} become leader",self.server_id);
         self.leader_id = Some((&self.server_id).to_string());
         self.state = NodeState::LEADER;
         let last_index = self.logs.latest_log_index();
         self.peers.iter_mut().for_each(|peer|{
             peer.next_index =  last_index+1;
         });
+    }
+
+    async fn try_append_entries(&mut self)->io::Result<()>{
+        io::timeout(Duration::from_millis(HEART_BEAT_TIMEOUT_MS),async {
+            while !self.append_entries().await {} 
+            Ok(())
+        }).await
     }
 
     async fn append_entries(&mut self)->bool{
@@ -284,7 +292,7 @@ impl <T :StateMachine> RaftNode<T> {
             let mut tx = tx.clone();
             task::spawn(async move{
                 let request = AppendEntriesRequest::new(term,&server_id,prev_log_index, prev_log_term,entries,leader_commit);
-                tx.send((i,request.send(&end_point).await)).await.unwrap();
+                let _ = tx.send((i,request.send(&end_point).await)).await;
             });
         }
         let mut received_num = 0;
@@ -302,7 +310,7 @@ impl <T :StateMachine> RaftNode<T> {
                     }
                 },
                 Err(_)=>{
-                    println!("oops , request fail");
+                    info!("oops , request fail");
                 },
             }
         }
@@ -319,7 +327,7 @@ pub async fn bootstrap(addr :&str, peers : Vec<Peer>) -> Result<()>{
     });
     let mut incoming = listener.incoming();
     while let Some(Ok(stream)) = incoming.next().await{
-        println!("Accepting from: {}", stream.peer_addr()?);
+        info!("{} , Accepting from: {}",addr, stream.peer_addr()?);
         spawn_and_log_error(handle_connection(producer.clone(),stream));
     }
     drop(producer);
@@ -328,7 +336,7 @@ pub async fn bootstrap(addr :&str, peers : Vec<Peer>) -> Result<()>{
 }
 
 async fn handle_connection(mut producer: Sender<OriginRequest> ,mut stream : TcpStream)->Result<()>{
-    let mut buf = vec![];
+    let mut buf = Vec::new();
     if let Ok(_n) = stream.read_to_end(&mut buf).await {
         let req = Request::parse(&buf)?;
         producer.send(OriginRequest::new(req,stream)).await?;
@@ -342,7 +350,10 @@ where
 {
     task::spawn(async move {
         if let Err(e) = fut.await {
-            eprintln!("{}", e)
+            eprint!("{}", e)
         }
     })
+}
+
+mod tests{
 }
