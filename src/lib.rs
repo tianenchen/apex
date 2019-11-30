@@ -81,14 +81,21 @@ mod tests{
     fn server3() {
         init();
         task::block_on(async {
-            let addr = "127.0.0.1:8081".to_string();
-            let peers = "127.0.0.1:8080,127.0.0.1:8082".to_string();
+            let addr = "127.0.0.1:8082".to_string();
+            let peers = "127.0.0.1:8080,127.0.0.1:8081".to_string();
             let peers :Vec<Peer> = peers.split(',').map(Peer::new).collect();
             task::spawn(async move{
                 node::bootstrap(&addr.clone(),peers).await.unwrap();
             }).await;
         });
         loop{}
+    }
+    #[test]
+    fn client(){
+        // use bincode::{deserialize, serialize};
+        // let command = common::Command::PUT(common::K::from(b"hello".to_vec()),common::V::from(b"world".to_vec()));
+        // let body = serialize(&command);
+        // let req = net::Request::new(net::RequestType::Message(command),body);
     }
 }
 

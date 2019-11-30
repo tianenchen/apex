@@ -1,74 +1,83 @@
 use crate::common::Command;
 use serde::{Serialize, Deserialize};
 use bincode::{deserialize, serialize};
-use async_std::{io,net::TcpStream, prelude::*};
+use async_std::{net::TcpStream, prelude::*};
 use std::net::Shutdown;
+use log::info;
 use crate::log::LogEntry;
 use crate::common::Result;
 
-const CONNECT_TIMEOUT :u64 = 50;
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum RequestType{
-    Vote,
-    AppendEntries,
-    Message(Command),
+pub enum Letter{
+
+    VoteRequest(VoteRequest),
+
+    AppendEntriesRequest(AppendEntriesRequest),
+
+    Command(Command),
+
+    VoteResponse(VoteResponse),
+
+    AppendEntriesResponse(AppendEntriesResponse),
+
+    Reply(Reply)
+
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Request{
-    pub req_type:RequestType,
-    pub body:Vec<u8>,
-}
-
-impl Request{
-    fn new(req_type:RequestType,body:Vec<u8>)->Self{
-        Request{ req_type,body }
-    }
-
-    pub fn parse(package : &[u8])->Result<Self>{
-        Ok(deserialize(&package[..])?)
-    }
-
-    pub fn to_vote_request(body :&[u8])->Result<VoteRequest>{
-        Ok(deserialize(&body[..])?)
-    }
-    
-    pub fn to_append_request(body :&[u8])->Result<AppendEntriesRequest>{
-        Ok(deserialize(&body[..])?)
-    }
-
-    async fn send(self,peer :&str)->Result<Vec<u8>>{
-        let mut stream = io::timeout(std::time::Duration::from_millis(CONNECT_TIMEOUT),async {
-            TcpStream::connect(peer).await
-        }).await?;
+impl Letter{
+    async fn send(self,peer :&str)->Result<Self>{
         let req = serialize(&self)?;
+        let mut buf = Vec::new();
+        let mut stream = TcpStream::connect(peer).await?;
         stream.write_all(&req[..]).await?;
         stream.shutdown(Shutdown::Write)?;
-        let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await?;
-        Ok(buf)
+        let letter = deserialize(&buf)?;
+        Ok(letter)
+    }
+}
+
+impl From<&[u8]> for Letter {
+    fn from(val: &[u8]) -> Letter {
+        deserialize(val).expect("deserialize letter fail")
+    }
+}
+impl Into<Vec<u8>> for Letter {
+    fn into(self) -> Vec<u8> {
+        serialize(&self).expect("serialize letter fail")
+    }
+}
+
+#[derive(Debug)]
+pub struct Communication{
+    pub letter : Letter ,
+    pub contact : TcpStream ,
+}
+
+impl Communication{
+    pub fn new(letter : Letter , contact : TcpStream) -> Self{
+        Communication{ letter , contact }
     }
 
-    async fn vote(vote :&VoteRequest,peer :&str)->Result<VoteResponse>{
-        let wrap = Self::new(RequestType::Vote, serialize(&vote)?);
-        let resp = wrap.send(peer).await?;
-        let resp : VoteResponse = deserialize(&resp[..]).expect("deserialize fail");
-        Ok(resp)
-    }
-
-    async fn append_entries(entries :&AppendEntriesRequest,peer :&str)->Result<AppendEntriesResponse>{
-        let wrap = Self::new(RequestType::AppendEntries, serialize(&entries)?);
-        let resp = wrap.send(peer).await?;
-        let resp : AppendEntriesResponse = deserialize(&resp[..])?;
-        Ok(resp)
+    pub async fn reply(&mut self,reply : Letter) -> Result<()>{
+        let reply : Vec<u8> = reply.into();
+        self.contact.write_all(&reply[..]).await?;
+        self.contact.shutdown(Shutdown::Both)?;
+        Ok(())
     }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum Response{
+pub enum Reply{
     Success,
     Fail(Reason)
+}
+
+impl Reply{
+    pub fn as_letter(self)->Letter{
+        Letter::Reply(self)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -79,7 +88,7 @@ pub enum Reason{
     Unavailable,
 }
 
-impl Response{
+impl Reply{
     pub fn serialize(self)->Vec<u8>{
         serialize(&self).unwrap()
     }
@@ -103,27 +112,31 @@ impl VoteRequest{
         }
     }
 
-    pub async fn send(&self,peer :&str)->Result<VoteResponse>{
-        Request::vote(self,peer).await
+    pub async fn send(self,peer :&str)->Result<VoteResponse>{
+        match Letter::VoteRequest(self).send(peer).await?{
+            Letter::VoteResponse(resp) => Ok(resp),
+            _ => panic!("this should not happen"),
+        }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct VoteResponse{
     pub term:u64,
     pub vote_granted:bool,
 }
 
 impl VoteResponse{
-    pub fn new(term :u64,vote_granted :bool)->Vec<u8>{
-        let resp = VoteResponse{
-            term,vote_granted
-        };
-        serialize(&resp).unwrap()
+    pub fn new (term :u64,vote_granted :bool) -> Self{
+        VoteResponse{ term,vote_granted }
+    }
+
+    pub fn as_letter(self)->Letter{
+        Letter::VoteResponse(self)
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Clone, Debug)]
 pub struct AppendEntriesRequest{
     pub term :u64,
     pub leader_id:String,
@@ -146,22 +159,112 @@ impl AppendEntriesRequest{
         }
     }
 
-    pub async fn send(&self,peer :&str)->Result<AppendEntriesResponse>{
-        Request::append_entries(&self,peer).await
+    pub async fn send(self,peer :&str)->Result<AppendEntriesResponse>{
+        match Letter::AppendEntriesRequest(self).send(peer).await?{
+            Letter::AppendEntriesResponse(resp) => Ok(resp),
+            _ => panic!("this should not happen"),
+        }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct AppendEntriesResponse{
     term :u64,
     pub success :bool,
 }
 
 impl AppendEntriesResponse{
-    pub fn new(term :u64,success :bool)->Vec<u8>{
-        let resp = AppendEntriesResponse{
+    pub fn new(term :u64,success :bool)->Self{
+        AppendEntriesResponse{
             term,success
-        };
-        serialize(&resp).unwrap()
+        }
+    }
+    pub fn as_letter(self)->Letter{
+        Letter::AppendEntriesResponse(self)
+    }
+}
+
+#[cfg(test)]
+mod tests{
+use super::*;
+    use async_std::{
+        io,
+        net::{TcpListener, TcpStream},
+        prelude::*,
+        task,
+        stream,
+    };
+    fn init() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+    fn simulation(){
+        task::spawn(async {
+            let listener = TcpListener::bind("127.0.0.1:9999").await.unwrap();
+            let mut incoming = listener.incoming();
+            while let Some(Ok(mut stream)) = incoming.next().await{
+                task::spawn(async move {
+                    let mut buf = Vec::new();
+                    stream.read_to_end(&mut buf).await.expect("read stream error");
+                    match Letter::from(&buf[..]){
+                        Letter::VoteRequest(req)=>{
+                            info!("{:?}",req);
+                            let letter = VoteResponse::new(1,true).as_letter();
+                            let mut communication = Communication::new(Letter::VoteRequest(req),stream);
+                            communication.reply(letter).await.unwrap();
+                        },
+                        Letter::AppendEntriesRequest(req)=>{
+                            info!("{:?}",req);
+                            let letter = AppendEntriesResponse::new(1,true).as_letter();
+                            let mut communication = Communication::new(Letter::AppendEntriesRequest(req),stream);
+                            communication.reply(letter).await.unwrap();
+                        },
+                        Letter::Command(cmd)=>{
+                            info!("{:?}",cmd);
+                        },
+                        Letter::VoteResponse(resp)=>{
+                            info!("{:?}",resp);
+                        },
+                        Letter::AppendEntriesResponse(resp)=>{
+                            info!("{:?}",resp);
+                        },
+                        Letter::Reply(rep)=>{
+                            info!("{:?}",rep);
+                        },
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn vote_test() {
+        init();
+        simulation();
+        task::block_on(async move{
+            let req = VoteRequest::new(1,"127.0.0.1:8080",1,1);
+            let resp = req.send("127.0.0.1:9999").await.unwrap();
+            assert_eq!(resp,VoteResponse::new(1,true));
+        });
+    }
+
+    #[test]
+    fn append_test() {
+        init();
+        simulation();
+        task::block_on(async move{
+            let req = AppendEntriesRequest::new(1,"127.0.0.1:8080",0,0,Vec::new(),0);
+            let resp = req.send("127.0.0.1:9999").await.unwrap();
+            assert_eq!(resp,AppendEntriesResponse::new(1,true));
+        });
+    }
+
+    #[test]
+    fn empty_pkg_test() {
+        init();
+        simulation();
+        task::block_on(async move{
+            let mut stream = TcpStream::connect("127.0.0.1:9999").await.unwrap();
+            // task::sleep(std::time::Duration::from_secs(1)).await;
+        });
     }
 }

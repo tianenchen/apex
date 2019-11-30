@@ -2,7 +2,7 @@ use futures::{channel::mpsc,SinkExt,select,FutureExt};
 use std::time::Duration;
 use std::io::{ Error , ErrorKind::Interrupted };
 use rand::{thread_rng, Rng};
-use log::info;
+use log::{info,debug};
 use async_std::{
     io,
     net::{TcpListener, TcpStream},
@@ -10,7 +10,6 @@ use async_std::{
     task,
     stream,
 };
-use std::net::Shutdown;
 use crate::log::{RaftLog,LogEntry};
 use crate::storage::{StateMachine,MemKVStateMachine};
 use crate::net::{*,Reason::*};
@@ -22,20 +21,6 @@ const HEART_BEAT_TIMEOUT_MS :u64 = 50;
 
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
-
-#[derive(Debug)]
-struct OriginRequest{
-    request :Request,
-    source :TcpStream,
-}
-
-impl OriginRequest{
-    fn new(request:Request,source:TcpStream)->Self{
-        OriginRequest{
-            request,source,
-        }
-    }
-}
 
 #[derive(Debug,PartialEq)]
 enum NodeState{
@@ -89,7 +74,7 @@ impl <T :StateMachine> RaftNode<T> {
         }
     }
 
-    async fn receive(&mut self,events: &mut Receiver<OriginRequest>){
+    async fn receive(&mut self,events: &mut Receiver<Communication>){
         loop{
             let rng :u64 = thread_rng().gen_range(150, 300);
             let event = io::timeout(Duration::from_millis(rng),async {
@@ -113,11 +98,11 @@ impl <T :StateMachine> RaftNode<T> {
         }
     }
 
-    async fn serve(&mut self , events: &mut Receiver<OriginRequest>){
+    async fn serve(&mut self , events: &mut Receiver<Communication>){
         let gap = Duration::from_millis(HEART_BEAT_TIMEOUT_MS);
         let mut interval = stream::interval(gap);
         loop{
-            select!{
+            let state = select!{
                 heartbeat = interval.next().fuse() =>{
                     if let Ok(()) = self.try_append_entries().await{
                         let mut snapshot = self.state_machine.snapshot();
@@ -126,59 +111,57 @@ impl <T :StateMachine> RaftNode<T> {
                         self.state_machine.take_a_snapshot(snapshot);
                         self.logs.truncate(self.commit_index);
                     }
+                    true
                 },
                 request = events.next().fuse() =>{
                     self.handle_request(&mut request.expect("request error")).await.expect("asdasdasdasdsd");
                     self.append_entries().await;
                     interval = stream::interval(gap);
+                    true
                 },
-                complete => {
-                }
-            }
+            };
         }
     }
 
-    async fn handle_request(&mut self,req:&mut OriginRequest)->Result<()>{
-        let resp = match &req.request.req_type{
-            RequestType::Vote=>{
-                let vote = Request::to_vote_request(&req.request.body)?;
+    async fn handle_request(&mut self,comm:&mut Communication)->Result<()>{
+        info!("handle letter : {:?}",&comm.letter);
+        let resp = match &comm.letter{
+            Letter::VoteRequest(vote)=>{
                 match vote{
-                    vote if vote.term < self.current_term => VoteResponse::new(self.current_term,false),
+                    vote if vote.term < self.current_term => VoteResponse::new(self.current_term,false).as_letter(),
                     vote if (self.voted_for == None || self.voted_for == Some(vote.candidate_id.clone()))
                                 &&vote.last_log_index<=self.logs.latest_log_index()
                                 &&vote.last_log_term<=self.logs.latest_log_term() 
-                     =>VoteResponse::new(self.current_term,true),
-                    _=>VoteResponse::new(self.current_term,false),
+                     =>VoteResponse::new(self.current_term,true).as_letter(),
+                    _=>VoteResponse::new(self.current_term,false).as_letter(),
                 }
             },
-            RequestType::AppendEntries=>{
-                let append_entries = Request::to_append_request(&req.request.body).expect("append entries fail !!!!");
-                info!("append entries : {:?}",append_entries);
+            Letter::AppendEntriesRequest(append_entries)=>{
                 match append_entries {
-                    append_entries if append_entries.term < self.current_term => AppendEntriesResponse::new(self.current_term,false),
+                    append_entries if append_entries.term < self.current_term => AppendEntriesResponse::new(self.current_term,false).as_letter(),
                     append_entries => {
                         let entry = self.logs.entry(append_entries.prev_log_index);
                         let leader_commit = append_entries.leader_commit;
                         match entry{
-                            Some(entry) if self.logs.latest_log_term() != entry.term => AppendEntriesResponse::new(self.current_term,false),
+                            Some(entry) if self.logs.latest_log_term() != entry.term => AppendEntriesResponse::new(self.current_term,false).as_letter(),
                             _=> {
                                 let last_index = match append_entries.entries.last(){
                                     Some(last) => last.index,
                                     None => self.logs.latest_log_index(),
                                 };
-                                self.logs.append(append_entries.prev_log_index,append_entries.entries);
+                                self.logs.append(append_entries.prev_log_index,append_entries.entries.clone());
                                 if leader_commit > self.commit_index{
                                     let next_index = std::cmp::min(leader_commit, last_index);
                                     self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
                                     self.commit_index = next_index;
                                 }
-                                VoteResponse::new(self.current_term,true)
+                                AppendEntriesResponse::new(self.current_term,true).as_letter()
                             },
                         }
                     }
                 }
             },
-            RequestType::Message(cmd)=>{
+            Letter::Command(cmd)=>{
                 let resp = match self.is_leader(){
                     true => {
                         let index = self.logs.latest_log_index()+1;
@@ -187,23 +170,24 @@ impl <T :StateMachine> RaftNode<T> {
                         match self.try_append_entries().await{
                             Ok(())=>{
                                 self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
-                                Response::Success
+                                Reply::Success
                             },
-                            Err(_)=>Response::Fail(Timeout),
+                            Err(_)=>Reply::Fail(Timeout),
                         }
                     },
                     false => {
                         match &self.leader_id{
-                            Some(leader_id) => Response::Fail(Redirect(leader_id.clone())),
-                            None => Response::Fail(Unavailable),
+                            Some(leader_id) => Reply::Fail(Redirect(leader_id.clone())),
+                            None => Reply::Fail(Unavailable),
                         }
                     },
                 };
-                resp.serialize()
+                resp.as_letter()
             },
+            _ => panic!("this should not happen"),
         };
-        req.source.write_all(&resp).await?;
-        req.source.shutdown(Shutdown::Write)?;
+        println!("send resp : {:?}", resp );
+        comm.reply(resp).await.expect("send fail !!!!!!!!!!!!!");
         Ok(())
     }
 
@@ -292,10 +276,11 @@ impl <T :StateMachine> RaftNode<T> {
             let mut tx = tx.clone();
             task::spawn(async move{
                 let request = AppendEntriesRequest::new(term,&server_id,prev_log_index, prev_log_term,entries,leader_commit);
+                debug!("{:?}",request);
                 let _ = tx.send((i,request.send(&end_point).await)).await;
             });
         }
-        let mut received_num = 0;
+        let mut received_num = 1;
         while let Some((index,resp)) = rx.next().await{
             match resp{
                 Ok(res)=>{
@@ -335,13 +320,11 @@ pub async fn bootstrap(addr :&str, peers : Vec<Peer>) -> Result<()>{
     Ok(())
 }
 
-async fn handle_connection(mut producer: Sender<OriginRequest> ,mut stream : TcpStream)->Result<()>{
+async fn handle_connection(mut producer: Sender<Communication> ,mut stream : TcpStream)->Result<()>{
     let mut buf = Vec::new();
-    if let Ok(_n) = stream.read_to_end(&mut buf).await {
-        let req = Request::parse(&buf)?;
-        producer.send(OriginRequest::new(req,stream)).await?;
-    }
-    Ok(())
+    stream.read_to_end(&mut buf).await.expect("read incomming stream error");
+    let letter = Letter::from(&buf[..]);
+    Ok(producer.send(Communication::new(letter,stream)).await?)
 }
 
 fn spawn_and_log_error<F>(fut: F) -> task::JoinHandle<()>
