@@ -5,10 +5,10 @@ use async_std::{net::TcpStream, prelude::*};
 use std::net::Shutdown;
 use log::info;
 use crate::log::LogEntry;
-use crate::common::Result;
+use crate::common::{Result,V};
 
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum Letter{
 
     VoteRequest(VoteRequest),
@@ -68,9 +68,9 @@ impl Communication{
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, PartialEq ,Debug)]
 pub enum Reply{
-    Success,
+    Success(Option<V>),
     Fail(Reason)
 }
 
@@ -80,7 +80,7 @@ impl Reply{
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize,PartialEq, Debug)]
 pub enum Reason{
     Redirect(String),
     InvalidArgument,
@@ -94,7 +94,7 @@ impl Reply{
     }
 }
 
-#[derive(Serialize, Deserialize, Debug,Clone)]
+#[derive(Serialize, Deserialize,PartialEq, Debug,Clone)]
 pub struct VoteRequest{
     pub term:u64,
     pub candidate_id:String,

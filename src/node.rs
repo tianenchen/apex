@@ -13,7 +13,7 @@ use async_std::{
 use crate::log::{RaftLog,LogEntry};
 use crate::storage::{StateMachine,MemKVStateMachine};
 use crate::net::{*,Reason::*};
-use crate::common::{Result};
+use crate::common::{Result,Command};
 
 const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
 
@@ -25,6 +25,12 @@ type Receiver<T> = mpsc::UnboundedReceiver<T>;
 #[derive(Debug,PartialEq)]
 enum NodeState{
     FOLLOWER, CANDIDATE, LEADER
+}
+
+enum RaftEvent{
+    Ordinary,
+    Degrade,//Found Newer Leader,
+    Accident,
 }
 
 pub struct RaftNode<T:StateMachine>{
@@ -81,7 +87,9 @@ impl <T :StateMachine> RaftNode<T> {
                 events.next().await.ok_or_else(|| Error::from(Interrupted))
             }).await;
             match event{
-                Ok(mut event)=>self.handle_request(&mut event).await.expect("receive msg fail !!!!"),
+                Ok(mut event)=>{
+                    let _ = self.handle_request(&mut event).await.expect("receive msg fail !!!!");
+                },
                 Err(_)=>{
                     if let Ok(()) = io::timeout(Duration::from_millis(rng-150),self.vote()).await{
                         match self.state{
@@ -94,7 +102,7 @@ impl <T :StateMachine> RaftNode<T> {
                     }
                     self.voted_for = None;
                 },
-            }
+            };
         }
     }
 
@@ -102,6 +110,7 @@ impl <T :StateMachine> RaftNode<T> {
         let gap = Duration::from_millis(HEART_BEAT_TIMEOUT_MS);
         let mut interval = stream::interval(gap);
         loop{
+            //FIXME
             let state = select!{
                 heartbeat = interval.next().fuse() =>{
                     if let Ok(()) = self.try_append_entries().await{
@@ -115,16 +124,16 @@ impl <T :StateMachine> RaftNode<T> {
                 },
                 request = events.next().fuse() =>{
                     self.handle_request(&mut request.expect("request error")).await.expect("asdasdasdasdsd");
-                    self.append_entries().await;
                     interval = stream::interval(gap);
                     true
                 },
             };
         }
+        self.become_follower();
     }
 
-    async fn handle_request(&mut self,comm:&mut Communication)->Result<()>{
-        info!("handle letter : {:?}",&comm.letter);
+    async fn handle_request(&mut self,comm:&mut Communication)->Result<RaftEvent>{
+        // info!("handle letter : {:?}",&comm.letter);
         let resp = match &comm.letter{
             Letter::VoteRequest(vote)=>{
                 match vote{
@@ -162,20 +171,21 @@ impl <T :StateMachine> RaftNode<T> {
                 }
             },
             Letter::Command(cmd)=>{
-                let resp = match self.is_leader(){
-                    true => {
+                let resp = match (self.is_leader(),cmd){
+                    (true,Command::GET(k)) => Reply::Success(self.state_machine.query(k.clone())),
+                    (true,_) => {
                         let index = self.logs.latest_log_index()+1;
                         let log = LogEntry::new(index, self.current_term,cmd.clone());
                         let next_index = self.logs.append(index,vec![log]);
                         match self.try_append_entries().await{
                             Ok(())=>{
                                 self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
-                                Reply::Success
+                                Reply::Success(None)
                             },
                             Err(_)=>Reply::Fail(Timeout),
                         }
                     },
-                    false => {
+                    (false,_) => {
                         match &self.leader_id{
                             Some(leader_id) => Reply::Fail(Redirect(leader_id.clone())),
                             None => Reply::Fail(Unavailable),
@@ -186,9 +196,8 @@ impl <T :StateMachine> RaftNode<T> {
             },
             _ => panic!("this should not happen"),
         };
-        println!("send resp : {:?}", resp );
         comm.reply(resp).await.expect("send fail !!!!!!!!!!!!!");
-        Ok(())
+        Ok(RaftEvent::Ordinary)
     }
 
     async fn vote(&mut self)->io::Result<()>{
@@ -250,6 +259,12 @@ impl <T :StateMachine> RaftNode<T> {
         self.peers.iter_mut().for_each(|peer|{
             peer.next_index =  last_index+1;
         });
+    }
+
+    fn become_follower(&mut self){
+        self.leader_id = None;
+        self.voted_for = None;
+        self.state= NodeState::FOLLOWER;
     }
 
     async fn try_append_entries(&mut self)->io::Result<()>{

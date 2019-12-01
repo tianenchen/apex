@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use crate::common::Command;
-use log::debug;
+use log::{debug,info};
 
 #[derive(Serialize, Deserialize, Debug,PartialEq,Clone)]
 pub struct LogEntry{
@@ -46,6 +46,7 @@ impl RaftLog{
     }
 
     pub fn term(&self,index :u64) -> u64{
+        info!("index :{} , offset :{}",index,self.offset);
         let index = index - self.offset;
         match self.log_entrys.get(index as usize){
             Some(item) => item.term,
@@ -72,15 +73,16 @@ impl RaftLog{
 
     pub fn truncate(&mut self,commited_index:u64) -> u64{
         if commited_index > 0{
-            self.offset += commited_index;
+            // self.offset += commited_index;
             self.log_entrys.truncate(self.offset as usize);
         }
         self.offset
     }
 
     pub fn append(&mut self,index :u64,entries :Vec<LogEntry>)->u64{
-        let mut index = (index - self.offset +1) as usize;
-        self.offset += entries.len() as u64;
+        let mut index = (index - self.offset) as usize;
+        info!("next index : {}",index);
+        // self.offset += entries.len() as u64;
         for log in entries.into_iter(){
             match self.log_entrys.get(index){
                 Some(exists_log)=>{

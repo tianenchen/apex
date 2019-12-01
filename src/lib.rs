@@ -8,8 +8,16 @@ pub mod common;
 #[cfg(test)]
 mod tests{
     use crate::node::Peer;
-    use async_std::task;
     use super::*;
+    use net::Letter;
+    use async_std::{
+        io,
+        net::{TcpListener, TcpStream},
+        prelude::*,
+        task,
+        stream,
+    };
+    use bincode::{deserialize, serialize};
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
     }
@@ -92,8 +100,27 @@ mod tests{
     }
     #[test]
     fn client(){
-        // use bincode::{deserialize, serialize};
-        // let command = common::Command::PUT(common::K::from(b"hello".to_vec()),common::V::from(b"world".to_vec()));
+        init();
+        task::block_on(async move{
+            // let put = common::Command::PUT(common::K::from(b"hello".to_vec()),common::V::from(b"world".to_vec()));
+            // let put_letter:Vec<u8> = Letter::Command(put).into();
+            // let mut stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
+            // stream.write_all(&put_letter[..]).await.unwrap();
+            // stream.shutdown(std::net::Shutdown::Write).unwrap();
+            // let mut buf = Vec::new();
+            // stream.read_to_end(&mut buf).await.unwrap();
+            // let letter :Letter = deserialize(&buf[..]).unwrap();
+            // assert_eq!(letter,Letter::Reply(net::Reply::Success(None)));
+            let get = common::Command::GET(common::K::from(b"hello".to_vec()));
+            let get_letter:Vec<u8> = Letter::Command(get).into();
+            let mut stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
+            stream.write_all(&get_letter[..]).await.unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            let letter :Letter = deserialize(&buf[..]).unwrap();
+            assert_eq!(letter,Letter::Reply(net::Reply::Success(Some(common::V::from(b"world".to_vec())))));
+        });
         // let body = serialize(&command);
         // let req = net::Request::new(net::RequestType::Message(command),body);
     }
