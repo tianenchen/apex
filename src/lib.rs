@@ -11,13 +11,11 @@ mod tests{
     use super::*;
     use net::Letter;
     use async_std::{
-        io,
-        net::{TcpListener, TcpStream},
+        net::TcpStream,
         prelude::*,
         task,
-        stream,
     };
-    use bincode::{deserialize, serialize};
+    use bincode::deserialize;
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
     }

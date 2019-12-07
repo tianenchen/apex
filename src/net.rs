@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 use bincode::{deserialize, serialize};
 use async_std::{net::TcpStream, prelude::*};
 use std::net::Shutdown;
-use log::info;
+
 use crate::log::LogEntry;
 use crate::common::{Result,V};
 
@@ -169,7 +169,7 @@ impl AppendEntriesRequest{
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct AppendEntriesResponse{
-    term :u64,
+    pub term :u64,
     pub success :bool,
 }
 
@@ -186,13 +186,11 @@ impl AppendEntriesResponse{
 
 #[cfg(test)]
 mod tests{
-use super::*;
+    use super::*;
+    use log::info;
     use async_std::{
-        io,
         net::{TcpListener, TcpStream},
-        prelude::*,
         task,
-        stream,
     };
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -263,7 +261,7 @@ use super::*;
         init();
         simulation();
         task::block_on(async move{
-            let mut stream = TcpStream::connect("127.0.0.1:9999").await.unwrap();
+            let mut _stream = TcpStream::connect("127.0.0.1:9999").await.unwrap();
             // task::sleep(std::time::Duration::from_secs(1)).await;
         });
     }
