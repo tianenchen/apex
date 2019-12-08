@@ -60,11 +60,12 @@ impl RaftLog{
     }
 
     pub fn entries(&self,start_index :u64,end_index :u64) -> &[LogEntry]{
-        debug!("start_index : {} , end_index :{}", start_index,end_index);
+        info!("start_index : {} , end_index :{}", start_index,end_index);
         let start_index = start_index - self.offset;
         let end_index = end_index - self.offset;
+        info!("start_index : {} , end_index :{}", start_index,end_index);
         if start_index<end_index{
-            &self.log_entrys[start_index as usize..=end_index as usize]
+            &self.log_entrys[start_index as usize..end_index as usize]
         }
         else {
             &[]
@@ -80,9 +81,9 @@ impl RaftLog{
     }
 
     pub fn append(&mut self,index :u64,entries :Vec<LogEntry>)->u64{
+        assert!(entries.len()>0);
         let mut index = (index - self.offset) as usize;
         info!("next index : {}",index);
-        // self.offset += entries.len() as u64;
         for log in entries.into_iter(){
             match self.log_entrys.get(index){
                 Some(exists_log)=>{

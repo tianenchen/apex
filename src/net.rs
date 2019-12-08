@@ -1,11 +1,10 @@
-use crate::common::Command;
 use serde::{Serialize, Deserialize};
 use bincode::{deserialize, serialize};
 use async_std::{net::TcpStream, prelude::*};
 use std::net::Shutdown;
 
 use crate::log::LogEntry;
-use crate::common::{Result,V};
+use crate::common::{Result,V,Error,Command};
 
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -35,6 +34,10 @@ impl Letter{
         stream.read_to_end(&mut buf).await?;
         let letter = deserialize(&buf)?;
         Ok(letter)
+    }
+
+    pub fn to_letter(val: &[u8])->Result<Self>{
+        deserialize(val).map_err(Error::from)
     }
 }
 

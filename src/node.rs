@@ -16,7 +16,9 @@ use crate::common::{Result,Command,Error};
 
 const MAX_LOG_ENTRIES_PER_REQUEST :u64 = 100;
 
-const HEART_BEAT_TIMEOUT_MS :u64 = 50;
+const HEART_BEAT_TIMEOUT_MS :u64 = 150;
+
+const APPEND_ENTRIES_TIMEOUT_MS :u64 = 120;
 
 type Sender<T> = mpsc::UnboundedSender<T>;
 type Receiver<T> = mpsc::UnboundedReceiver<T>;
@@ -148,7 +150,7 @@ impl <T :StateMachine> RaftNode<T> {
     }
 
     async fn handle_request(&mut self,comm:&mut Communication)->Result<Signal>{
-        // info!("handle letter : {:?}",&comm.letter);
+        info!("handle letter : {:?}",&comm.letter);
         let resp = match &comm.letter{
             Letter::VoteRequest(vote)=>{
                 match vote{
@@ -175,10 +177,13 @@ impl <T :StateMachine> RaftNode<T> {
                                     Some(last) => last.index,
                                     None => self.logs.latest_log_index(),
                                 };
-                                self.logs.append(append_entries.prev_log_index,append_entries.entries.clone());
+                                if append_entries.entries.len()>0{
+                                    self.logs.append(append_entries.prev_log_index,append_entries.entries.clone());
+                                }
                                 if leader_commit > self.commit_index{
                                     let next_index = std::cmp::min(leader_commit, last_index);
                                     self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
+                                    self.current_term = self.state_machine.get_last_term();
                                     self.commit_index = next_index;
                                 }
                                 Some(AppendEntriesResponse::new(self.current_term,true).as_letter())
@@ -194,11 +199,14 @@ impl <T :StateMachine> RaftNode<T> {
                         let index = self.logs.latest_log_index()+1;
                         let log = LogEntry::new(index, self.current_term,cmd.clone());
                         let next_index = self.logs.append(index,vec![log]);
+                        info!("append success");
                         match self.try_append_entries().await{
                             Ok(signal)=>{
                                 match signal{
                                     Signal::Next=>{
-                                        self.state_machine.apply(self.logs.entries(self.commit_index+1,next_index));
+                                        info!("start aaaa: {},end aaaa : {}",self.commit_index,next_index - 1);
+                                        self.state_machine.apply(self.logs.entries(self.commit_index,next_index - 1 ));
+                                        info!("apply successful");
                                         Reply::Success(None)
                                     },
                                     _ => return Ok(Signal::Degrade)
@@ -290,6 +298,7 @@ impl <T :StateMachine> RaftNode<T> {
     }
 
     fn become_follower(&mut self){
+        info!("peer : {} become follower",self.server_id);
         self.leader_id = None;
         self.voted_for = None;
         self.state= NodeState::FOLLOWER;
@@ -303,7 +312,8 @@ impl <T :StateMachine> RaftNode<T> {
     }
 
     async fn append_entries(&mut self)->Result<Signal>{
-        let (tx , mut rx) = mpsc::unbounded();
+        let capacity = self.peers.len();
+        let (tx , mut rx) = mpsc::channel(capacity);
         for (i,peer) in self.peers.iter_mut().enumerate(){
             let prev_log_index = peer.next_index - 1;
             let last_index = std::cmp::min(self.logs.latest_log_index(),MAX_LOG_ENTRIES_PER_REQUEST+prev_log_index);
@@ -320,12 +330,19 @@ impl <T :StateMachine> RaftNode<T> {
             task::spawn(async move{
                 let request = AppendEntriesRequest::new(term,&server_id,prev_log_index, prev_log_term,entries,leader_commit);
                 debug!("{:?}",request);
-                let resp = request.send(&end_point).await;
-                let _ = tx.send((i,resp)).await;
+                if let Ok(resp) = io::timeout(Duration::from_millis(APPEND_ENTRIES_TIMEOUT_MS-20),async {
+                    Ok(request.send(&end_point).await)
+                }).await{
+                    let _ = tx.send((i,resp)).await;
+                };
+                if i == capacity -1 {
+                    tx.close_channel();
+                }
             });
         }
         let mut received_num = 1;
         while let Some((index,resp)) = rx.next().await{
+            debug!("resp : {:?}",resp);
             match resp{
                 Ok(res)=>{
                     let last_index = std::cmp::min(self.logs.latest_log_index(),MAX_LOG_ENTRIES_PER_REQUEST+self.peers[index].next_index-1);
@@ -375,8 +392,12 @@ pub async fn bootstrap(addr :&str, peers : Vec<Peer>) -> Result<()>{
 async fn handle_connection(mut producer: Sender<Communication> ,mut stream : TcpStream)->Result<()>{
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.expect("read incomming stream error");
-    let letter = Letter::from(&buf[..]);
-    Ok(producer.send(Communication::new(letter,stream)).await?)
+    // let letter = Letter::to_letter(&buf[..])?;
+    // Ok(producer.send(Communication::new(letter,stream)).await?)
+    if let Ok(letter) = Letter::to_letter(&buf[..]){
+        producer.send(Communication::new(letter,stream)).await?;
+    }
+    Ok(())
 }
 
 fn spawn_and_log_error<F>(fut: F) -> task::JoinHandle<()>

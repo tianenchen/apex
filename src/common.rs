@@ -4,7 +4,6 @@ use serde::{Serialize, Deserialize};
 
 use futures::channel;
 
-
 pub type Result<T> = std::result::Result<T,Error>;
 
 #[derive(Debug)]
