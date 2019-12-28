@@ -110,15 +110,33 @@ mod tests{
             let letter :Letter = deserialize(&buf[..]).unwrap();
             assert_eq!(letter,Letter::Reply(net::Reply::Success(None)));
 
-            // let get = common::Command::GET(common::K::from(b"hello".to_vec()));
-            // let get_letter:Vec<u8> = Letter::Command(get).into();
-            // let mut stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
-            // stream.write_all(&get_letter[..]).await.unwrap();
-            // stream.shutdown(std::net::Shutdown::Write).unwrap();
-            // let mut buf = Vec::new();
-            // stream.read_to_end(&mut buf).await.unwrap();
-            // let letter :Letter = deserialize(&buf[..]).unwrap();
-            // assert_eq!(letter,Letter::Reply(net::Reply::Success(Some(common::V::from(b"world".to_vec())))));
+            let get = common::Command::GET(common::K::from(b"hello".to_vec()));
+            let get_letter:Vec<u8> = Letter::Command(get).into();
+            let mut stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
+            stream.write_all(&get_letter[..]).await.unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            let letter :Letter = deserialize(&buf[..]).unwrap();
+            assert_eq!(letter,Letter::Reply(net::Reply::Success(Some(common::V::from(b"world".to_vec())))));
+        });
+        // let body = serialize(&command);
+        // let req = net::Request::new(net::RequestType::Message(command),body);
+    }
+
+    #[test]
+    fn another(){
+        init();
+        task::block_on(async move{
+            let get = common::Command::GET(common::K::from(b"hello".to_vec()));
+            let get_letter:Vec<u8> = Letter::Command(get).into();
+            let mut stream = TcpStream::connect("127.0.0.1:8081").await.unwrap();
+            stream.write_all(&get_letter[..]).await.unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            let letter :Letter = deserialize(&buf[..]).unwrap();
+            assert_eq!(letter,Letter::Reply(net::Reply::Success(Some(common::V::from(b"world".to_vec())))));
         });
         // let body = serialize(&command);
         // let req = net::Request::new(net::RequestType::Message(command),body);

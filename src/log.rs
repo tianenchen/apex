@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use crate::common::Command;
-use log::{debug,info};
+use log::{info};
 
 #[derive(Serialize, Deserialize, Debug,PartialEq,Clone)]
 pub struct LogEntry{
@@ -46,7 +46,6 @@ impl RaftLog{
     }
 
     pub fn term(&self,index :u64) -> u64{
-        info!("index :{} , offset :{}",index,self.offset);
         let index = index - self.offset;
         match self.log_entrys.get(index as usize){
             Some(item) => item.term,
@@ -63,7 +62,6 @@ impl RaftLog{
         info!("start_index : {} , end_index :{}", start_index,end_index);
         let start_index = start_index - self.offset;
         let end_index = end_index - self.offset;
-        info!("start_index : {} , end_index :{}", start_index,end_index);
         if start_index<end_index{
             &self.log_entrys[start_index as usize..end_index as usize]
         }

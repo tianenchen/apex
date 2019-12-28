@@ -89,7 +89,7 @@ impl <T :StateMachine> RaftNode<T> {
             }).await;
             match event{
                 Ok(Some(mut event))=>{
-                    let _ = self.handle_request(&mut event).await.expect("receive msg fail !!!!");
+                    let _ = self.handle_request(&mut event).await;
                 },
                 _ =>{
                     if let Ok(()) = io::timeout(Duration::from_millis(rng-150),self.vote()).await{
@@ -150,7 +150,7 @@ impl <T :StateMachine> RaftNode<T> {
     }
 
     async fn handle_request(&mut self,comm:&mut Communication)->Result<Signal>{
-        info!("handle letter : {:?}",&comm.letter);
+        // info!("handle letter : {:?}",&comm.letter);
         let resp = match &comm.letter{
             Letter::VoteRequest(vote)=>{
                 match vote{
@@ -381,7 +381,6 @@ pub async fn bootstrap(addr :&str, peers : Vec<Peer>) -> Result<()>{
     });
     let mut incoming = listener.incoming();
     while let Some(Ok(stream)) = incoming.next().await{
-        info!("{} , Accepting from: {}",addr, stream.peer_addr()?);
         spawn_and_log_error(handle_connection(producer.clone(),stream));
     }
     drop(producer);
